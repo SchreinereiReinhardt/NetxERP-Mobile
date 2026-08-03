@@ -159,7 +159,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         refresh()
     }
 
-    suspend fun login() {
+    fun login() {
+        viewModelScope.launch { loginInternal() }
+    }
+
+    private suspend fun loginInternal() {
         if (loginState.server.isBlank() || loginState.username.isBlank() || loginState.password.isBlank()) {
             loginState = loginState.copy(error = "Server, Benutzer und Passwort eingeben.")
             return
@@ -215,7 +219,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    suspend fun refresh() {
+    fun refresh() {
+        viewModelScope.launch { refreshInternal() }
+    }
+
+    private suspend fun refreshInternal() {
         if (!loginState.loggedIn || accessToken.isBlank()) return
         dataState = dataState.copy(loading = true, error = null)
         val dashboardResult = authorizedRequest { token -> NextErpApi.dashboard(loginState.server, token) }
@@ -441,7 +449,6 @@ private fun SplashScreen() {
 
 @Composable
 private fun LoginScreen(state: LoginState, vm: AppViewModel) {
-    val scope = rememberCoroutineScope()
     Surface(Modifier.fillMaxSize()) {
         Column(
             modifier = Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()),
@@ -461,7 +468,7 @@ private fun LoginScreen(state: LoginState, vm: AppViewModel) {
             OutlinedTextField(state.password, vm::updatePassword, label = { Text("Passwort oder App-Passwort") }, leadingIcon = { Icon(Icons.Default.Lock, null) }, visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth())
             state.error?.let { Spacer(Modifier.height(12.dp)); Text(it, color = MaterialTheme.colorScheme.error) }
             Spacer(Modifier.height(20.dp))
-            Button(onClick = { scope.launch { vm.login() } }, enabled = !state.loading, modifier = Modifier.fillMaxWidth().height(58.dp), shape = RoundedCornerShape(18.dp)) {
+            Button(onClick = vm::login, enabled = !state.loading, modifier = Modifier.fillMaxWidth().height(58.dp), shape = RoundedCornerShape(18.dp)) {
                 if (state.loading) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
                 else { Icon(Icons.Default.Login, null); Spacer(Modifier.width(8.dp)); Text("Anmelden", fontWeight = FontWeight.SemiBold) }
             }
@@ -473,15 +480,14 @@ private fun LoginScreen(state: LoginState, vm: AppViewModel) {
 
 @Composable
 private fun AppShell(vm: AppViewModel) {
-    val scope = rememberCoroutineScope()
     Scaffold(
-        topBar = { AppHeader(vm.loginState.displayName, vm.loginState.role, vm.screen, { scope.launch { vm.refresh() } }, vm::logout) },
+        topBar = { AppHeader(vm.loginState.displayName, vm.loginState.role, vm.screen, vm::refresh, vm::logout) },
         bottomBar = { AppBottomBar(vm.screen, vm::navigate) }
     ) { padding ->
         Box(Modifier.padding(padding)) {
             when (vm.screen) {
-                Screen.TODAY -> TodayScreen(vm.dataState, vm::openProject) { scope.launch { vm.refresh() } }
-                Screen.PROJECTS -> ProjectsScreen(vm.dataState, vm::openProject) { scope.launch { vm.refresh() } }
+                Screen.TODAY -> TodayScreen(vm.dataState, vm::openProject, vm::refresh)
+                Screen.PROJECTS -> ProjectsScreen(vm.dataState, vm::openProject, vm::refresh)
                 Screen.PROJECT -> ProjectScreen(vm.dataState.selectedProject)
                 Screen.SCANNER -> PlaceholderScreen("Scanner", "Dokumente und QR-Codes folgen im nächsten Ausbau.", Icons.Default.QrCodeScanner)
                 Screen.MATERIAL -> PlaceholderScreen("Material", "Die Materialsuche wird als Nächstes an /material angebunden.", Icons.Default.Inventory2)
