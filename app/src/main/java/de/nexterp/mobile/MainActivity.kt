@@ -26,19 +26,15 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import de.nexterp.mobile.ui.theme.NextERPTheme
 import java.net.HttpURLConnection
 import java.net.URL
+import java.nio.charset.StandardCharsets
 import java.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 
-class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        setContent { NextERPTheme { NextERPApp() } }
-    }
-}
-
-enum class Screen { TODAY, PROJECTS, PROJECT, MONTEUR, SCANNER, MATERIAL, DOCUMENTS, MORE }
+enum class Screen { TODAY, PROJECTS, PROJECT, SCANNER, MATERIAL, DOCUMENTS, MORE }
 
 data class LoginState(
     val server: String = "https://cloud.kassel-net.de",
@@ -50,17 +46,54 @@ data class LoginState(
     val error: String? = null
 )
 
+data class DashboardData(
+    val displayName: String = "",
+    val role: String = "monteur",
+    val activeProjects: Int = 0,
+    val openTasks: Int = 0,
+    val newDocuments: Int = 0,
+    val openReports: Int = 0,
+    val todayProject: ProjectDto? = null
+)
+
+data class ProjectDto(
+    val id: Int,
+    val projectNo: String,
+    val title: String,
+    val status: String,
+    val customerName: String,
+    val address: String,
+    val phone: String,
+    val email: String
+)
+
+data class DataState(
+    val loading: Boolean = false,
+    val dashboard: DashboardData? = null,
+    val projects: List<ProjectDto> = emptyList(),
+    val selectedProject: ProjectDto? = null,
+    val error: String? = null
+)
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent { NextERPTheme { NextERPApp() } }
+    }
+}
+
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val prefs = application.getSharedPreferences("nexterp_session", 0)
 
     var loginState by mutableStateOf(
         LoginState(
             server = prefs.getString("server", "https://cloud.kassel-net.de") ?: "https://cloud.kassel-net.de",
-            username = prefs.getString("username", "") ?: "",
-            loggedIn = prefs.getBoolean("loggedIn", false),
-            displayName = prefs.getString("displayName", "") ?: ""
+            username = prefs.getString("username", "") ?: ""
         )
     )
+        private set
+
+    var dataState by mutableStateOf(DataState())
         private set
 
     var screen by mutableStateOf(Screen.TODAY)
@@ -69,75 +102,178 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun updateServer(value: String) { loginState = loginState.copy(server = value) }
     fun updateUsername(value: String) { loginState = loginState.copy(username = value) }
     fun updatePassword(value: String) { loginState = loginState.copy(password = value) }
+
     fun navigate(target: Screen) { screen = target }
 
-    fun demo() {
-        loginState = loginState.copy(loggedIn = true, displayName = "Demo-Monteur", error = null)
-        screen = Screen.TODAY
+    fun openProject(project: ProjectDto) {
+        dataState = dataState.copy(selectedProject = project)
+        screen = Screen.PROJECT
     }
 
     fun logout() {
-        prefs.edit().clear().apply()
-        loginState = LoginState(server = loginState.server)
+        loginState = LoginState(server = loginState.server, username = loginState.username)
+        dataState = DataState()
         screen = Screen.TODAY
     }
 
     suspend fun login() {
         if (loginState.username.isBlank() || loginState.password.isBlank()) {
-            loginState = loginState.copy(error = "Benutzer und Passwort eingeben.")
+            loginState = loginState.copy(error = "Benutzer und App-Passwort eingeben.")
             return
         }
+
         loginState = loginState.copy(loading = true, error = null)
-        val result = NextcloudAuth.check(loginState.server, loginState.username, loginState.password)
-        loginState = if (result.isSuccess) {
-            val displayName = result.getOrNull().orEmpty()
-            prefs.edit()
-                .putString("server", loginState.server.trimEnd('/'))
-                .putString("username", loginState.username)
-                .putString("displayName", displayName)
-                .putBoolean("loggedIn", true)
-                .apply()
-            loginState.copy(loading = false, loggedIn = true, displayName = displayName, password = "")
-        } else {
-            loginState.copy(loading = false, error = result.exceptionOrNull()?.message ?: "Anmeldung fehlgeschlagen")
+        val auth = NextcloudApi.checkLogin(loginState.server, loginState.username, loginState.password)
+        if (auth.isFailure) {
+            loginState = loginState.copy(
+                loading = false,
+                error = auth.exceptionOrNull()?.message ?: "Anmeldung fehlgeschlagen"
+            )
+            return
         }
+
+        val displayName = auth.getOrNull().orEmpty()
+        prefs.edit()
+            .putString("server", loginState.server.trimEnd('/'))
+            .putString("username", loginState.username)
+            .apply()
+
+        loginState = loginState.copy(
+            loading = false,
+            loggedIn = true,
+            displayName = displayName,
+            error = null
+        )
+        refresh()
+    }
+
+    suspend fun refresh() {
+        if (!loginState.loggedIn || loginState.password.isBlank()) return
+        dataState = dataState.copy(loading = true, error = null)
+
+        val dashboardResult = NextcloudApi.loadDashboard(
+            loginState.server,
+            loginState.username,
+            loginState.password
+        )
+        val projectsResult = NextcloudApi.loadProjects(
+            loginState.server,
+            loginState.username,
+            loginState.password
+        )
+
+        if (dashboardResult.isFailure || projectsResult.isFailure) {
+            val message = dashboardResult.exceptionOrNull()?.message
+                ?: projectsResult.exceptionOrNull()?.message
+                ?: "Daten konnten nicht geladen werden."
+            dataState = dataState.copy(loading = false, error = message)
+            return
+        }
+
+        dataState = DataState(
+            loading = false,
+            dashboard = dashboardResult.getOrNull(),
+            projects = projectsResult.getOrNull().orEmpty(),
+            selectedProject = dataState.selectedProject,
+            error = null
+        )
     }
 }
 
-object NextcloudAuth {
-    suspend fun check(server: String, user: String, password: String): Result<String> = withContext(Dispatchers.IO) {
-        runCatching {
-            val base = server.trim().trimEnd('/')
-            require(base.startsWith("https://")) { "Bitte eine HTTPS-Serveradresse verwenden." }
-            val connection = (URL("$base/ocs/v2.php/cloud/user?format=json").openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 12_000
-                readTimeout = 12_000
-                setRequestProperty("OCS-APIRequest", "true")
-                val credentials = Base64.getEncoder().encodeToString("$user:$password".toByteArray())
-                setRequestProperty("Authorization", "Basic $credentials")
+object NextcloudApi {
+    private fun basicAuth(user: String, password: String): String {
+        val raw = "$user:$password".toByteArray(StandardCharsets.UTF_8)
+        return "Basic ${Base64.getEncoder().encodeToString(raw)}"
+    }
+
+    private suspend fun getJson(
+        server: String,
+        path: String,
+        user: String,
+        password: String,
+        ocs: Boolean = false
+    ): JSONObject = withContext(Dispatchers.IO) {
+        val base = server.trim().trimEnd('/')
+        require(base.startsWith("https://")) { "Bitte eine HTTPS-Serveradresse verwenden." }
+        val connection = (URL("$base$path").openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 15_000
+            readTimeout = 15_000
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("Authorization", basicAuth(user, password))
+            if (ocs) setRequestProperty("OCS-APIRequest", "true")
+        }
+        try {
+            val code = connection.responseCode
+            if (code !in 200..299) {
+                val detail = when (code) {
+                    401 -> "Anmeldung abgelehnt. Bitte App-Passwort prüfen."
+                    404 -> "Die NextERP-Mobile-API ist auf dem Server noch nicht installiert."
+                    else -> "Serverfehler HTTP $code."
+                }
+                error(detail)
             }
-            try {
-                val code = connection.responseCode
-                if (code !in 200..299) error("Nextcloud-Anmeldung fehlgeschlagen (HTTP $code).")
-                val body = connection.inputStream.bufferedReader().use { it.readText() }
-                Regex("\\\"displayname\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"")
-                    .find(body)?.groupValues?.get(1) ?: user
-            } finally {
-                connection.disconnect()
+            val body = connection.inputStream.bufferedReader().use { it.readText() }
+            JSONObject(body)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    suspend fun checkLogin(server: String, user: String, password: String): Result<String> = runCatching {
+        val json = getJson(server, "/ocs/v2.php/cloud/user?format=json", user, password, ocs = true)
+        json.optJSONObject("ocs")
+            ?.optJSONObject("data")
+            ?.optString("displayname")
+            ?.takeIf { it.isNotBlank() }
+            ?: user
+    }
+
+    suspend fun loadDashboard(server: String, user: String, password: String): Result<DashboardData> = runCatching {
+        val json = getJson(server, "/index.php/apps/reinhardterp/api/mobile/v1/dashboard", user, password)
+        val userJson = json.optJSONObject("user") ?: JSONObject()
+        val cards = json.optJSONObject("cards") ?: JSONObject()
+        val today = json.optJSONObject("todayProject")
+        DashboardData(
+            displayName = userJson.optString("displayName", user),
+            role = userJson.optString("role", "monteur"),
+            activeProjects = cards.optInt("activeProjects", 0),
+            openTasks = cards.optInt("openTasks", 0),
+            newDocuments = cards.optInt("newDocuments", 0),
+            openReports = cards.optInt("openReports", 0),
+            todayProject = today?.takeIf { it.length() > 0 }?.toProject()
+        )
+    }
+
+    suspend fun loadProjects(server: String, user: String, password: String): Result<List<ProjectDto>> = runCatching {
+        val json = getJson(server, "/index.php/apps/reinhardterp/api/mobile/v1/projects", user, password)
+        val array = json.optJSONArray("projects") ?: JSONArray()
+        buildList {
+            for (i in 0 until array.length()) {
+                add(array.getJSONObject(i).toProject())
             }
         }
     }
+
+    private fun JSONObject.toProject(): ProjectDto = ProjectDto(
+        id = optInt("id"),
+        projectNo = optString("projectNo"),
+        title = optString("title", "Projekt"),
+        status = optString("status", "offen"),
+        customerName = optString("customerName"),
+        address = optString("address"),
+        phone = optString("phone"),
+        email = optString("email")
+    )
 }
 
 @Composable
 fun NextERPApp(vm: AppViewModel = viewModel()) {
     if (!vm.loginState.loggedIn) {
         LoginScreen(vm.loginState, vm)
-        return
+    } else {
+        AppShell(vm)
     }
-
-    AppShell(vm)
 }
 
 @Composable
@@ -149,44 +285,94 @@ private fun LoginScreen(state: LoginState, vm: AppViewModel) {
             verticalArrangement = Arrangement.Center
         ) {
             Surface(shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.primaryContainer) {
-                Icon(Icons.Default.Handyman, null, modifier = Modifier.padding(18.dp).size(44.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                Icon(
+                    Icons.Default.Handyman,
+                    contentDescription = null,
+                    modifier = Modifier.padding(18.dp).size(44.dp),
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer
+                )
             }
             Spacer(Modifier.height(20.dp))
             Text("NextERP Mobile", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
-            Text("Genau das, was du jetzt auf der Baustelle brauchst.", style = MaterialTheme.typography.bodyLarge)
+            Text("Alles, was du heute auf der Baustelle brauchst.", style = MaterialTheme.typography.bodyLarge)
             Spacer(Modifier.height(28.dp))
-            OutlinedTextField(state.server, vm::updateServer, label = { Text("Nextcloud-Server") }, leadingIcon = { Icon(Icons.Default.Cloud, null) }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(
+                state.server,
+                vm::updateServer,
+                label = { Text("Nextcloud-Server") },
+                leadingIcon = { Icon(Icons.Default.Cloud, null) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
             Spacer(Modifier.height(12.dp))
-            OutlinedTextField(state.username, vm::updateUsername, label = { Text("Benutzer") }, leadingIcon = { Icon(Icons.Default.Person, null) }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(
+                state.username,
+                vm::updateUsername,
+                label = { Text("Benutzer") },
+                leadingIcon = { Icon(Icons.Default.Person, null) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
             Spacer(Modifier.height(12.dp))
-            OutlinedTextField(state.password, vm::updatePassword, label = { Text("Passwort / App-Passwort") }, leadingIcon = { Icon(Icons.Default.Lock, null) }, visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth())
-            state.error?.let { Spacer(Modifier.height(12.dp)); Text(it, color = MaterialTheme.colorScheme.error) }
-            Spacer(Modifier.height(20.dp))
-            Button(onClick = { scope.launch { vm.login() } }, enabled = !state.loading, modifier = Modifier.fillMaxWidth().height(58.dp), shape = RoundedCornerShape(18.dp)) {
-                if (state.loading) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
-                else { Icon(Icons.Default.Login, null); Spacer(Modifier.width(8.dp)); Text("Anmelden", fontWeight = FontWeight.SemiBold) }
+            OutlinedTextField(
+                state.password,
+                vm::updatePassword,
+                label = { Text("App-Passwort") },
+                leadingIcon = { Icon(Icons.Default.Lock, null) },
+                visualTransformation = PasswordVisualTransformation(),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            state.error?.let {
+                Spacer(Modifier.height(12.dp))
+                Text(it, color = MaterialTheme.colorScheme.error)
             }
-            Spacer(Modifier.height(8.dp))
-            OutlinedButton(onClick = vm::demo, modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(18.dp)) { Text("Demo öffnen") }
+            Spacer(Modifier.height(20.dp))
+            Button(
+                onClick = { scope.launch { vm.login() } },
+                enabled = !state.loading,
+                modifier = Modifier.fillMaxWidth().height(58.dp),
+                shape = RoundedCornerShape(18.dp)
+            ) {
+                if (state.loading) {
+                    CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                } else {
+                    Icon(Icons.Default.Login, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Anmelden", fontWeight = FontWeight.SemiBold)
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "Es werden keine Testdaten angezeigt. Nach der Anmeldung lädt die App ausschließlich Daten aus NextERP.",
+                style = MaterialTheme.typography.bodySmall
+            )
         }
     }
 }
 
 @Composable
 private fun AppShell(vm: AppViewModel) {
+    val scope = rememberCoroutineScope()
     Scaffold(
-        topBar = { AppHeader(vm.loginState.displayName, vm.screen, vm::logout) },
+        topBar = {
+            AppHeader(
+                name = vm.loginState.displayName,
+                screen = vm.screen,
+                onRefresh = { scope.launch { vm.refresh() } },
+                onLogout = vm::logout
+            )
+        },
         bottomBar = { AppBottomBar(vm.screen, vm::navigate) }
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize()) {
             when (vm.screen) {
-                Screen.TODAY -> TodayScreen(vm::navigate)
-                Screen.PROJECTS -> ProjectsScreen(vm::navigate)
-                Screen.PROJECT -> ProjectScreen(vm::navigate)
-                Screen.MONTEUR -> MonteurScreen()
+                Screen.TODAY -> TodayScreen(vm.dataState, vm::openProject, { scope.launch { vm.refresh() } })
+                Screen.PROJECTS -> ProjectsScreen(vm.dataState, vm::openProject, { scope.launch { vm.refresh() } })
+                Screen.PROJECT -> ProjectScreen(vm.dataState.selectedProject)
                 Screen.SCANNER -> PlaceholderScreen("Scanner", "Dokumente und Barcodes erfassen", Icons.Default.QrCodeScanner)
-                Screen.MATERIAL -> MaterialScreen()
-                Screen.DOCUMENTS -> DocumentsScreen()
+                Screen.MATERIAL -> PlaceholderScreen("Material", "Noch keine Materialdaten vom Server", Icons.Default.Inventory2)
+                Screen.DOCUMENTS -> PlaceholderScreen("Dokumente", "Noch keine Dokumentdaten vom Server", Icons.Default.Description)
                 Screen.MORE -> MoreScreen(vm::logout)
             }
         }
@@ -194,24 +380,27 @@ private fun AppShell(vm: AppViewModel) {
 }
 
 @Composable
-private fun AppHeader(name: String, screen: Screen, logout: () -> Unit) {
+private fun AppHeader(name: String, screen: Screen, onRefresh: () -> Unit, onLogout: () -> Unit) {
     val title = when (screen) {
         Screen.TODAY -> "Heute"
         Screen.PROJECTS -> "Projekte"
         Screen.PROJECT -> "Projekt"
-        Screen.MONTEUR -> "Monteurmodus"
         Screen.SCANNER -> "Scanner"
         Screen.MATERIAL -> "Material"
         Screen.DOCUMENTS -> "Dokumente"
         Screen.MORE -> "Mehr"
     }
     Surface(tonalElevation = 2.dp) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Column(Modifier.weight(1f)) {
                 Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 Text(name, style = MaterialTheme.typography.bodySmall)
             }
-            IconButton(onClick = logout) { Icon(Icons.Default.Logout, "Abmelden") }
+            IconButton(onClick = onRefresh) { Icon(Icons.Default.Refresh, "Aktualisieren") }
+            IconButton(onClick = onLogout) { Icon(Icons.Default.Logout, "Abmelden") }
         }
     }
 }
@@ -228,146 +417,112 @@ private fun AppBottomBar(selected: Screen, navigate: (Screen) -> Unit) {
     )
     NavigationBar {
         items.forEach { (screen, icon, label) ->
-            NavigationBarItem(selected = selected == screen || (selected == Screen.PROJECT && screen == Screen.PROJECTS), onClick = { navigate(screen) }, icon = { Icon(icon, label) }, label = { Text(label) })
+            NavigationBarItem(
+                selected = selected == screen || (selected == Screen.PROJECT && screen == Screen.PROJECTS),
+                onClick = { navigate(screen) },
+                icon = { Icon(icon, label) },
+                label = { Text(label) }
+            )
         }
     }
 }
 
 @Composable
-private fun TodayScreen(navigate: (Screen) -> Unit) {
+private fun TodayScreen(state: DataState, openProject: (ProjectDto) -> Unit, refresh: () -> Unit) {
     ScreenColumn {
-        Text("Guten Morgen", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        StatusCard("Aktuelles Projekt", "Wohnhaus Müller · Kassel", Icons.Default.HomeWork, "Heute", { navigate(Screen.PROJECT) })
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Box(Modifier.weight(1f)) { StatusCard("Navigation", "Baustelle", Icons.Default.Navigation, null, { navigate(Screen.PROJECT) }) }
-            Box(Modifier.weight(1f)) { StatusCard("Ankommen", "Zeit starten", Icons.Default.PlayCircle, null, { navigate(Screen.MONTEUR) }) }
-        }
-        StatusCard("Offene Aufgaben", "3 Aufgaben für heute", Icons.Default.CheckCircle, "3", { navigate(Screen.PROJECT) })
-        StatusCard("Neue Dokumente", "2 neue Pläne", Icons.Default.Description, "2", { navigate(Screen.DOCUMENTS) })
-        StatusCard("Rapport", "Heute erfassen", Icons.Default.EditNote, null, { navigate(Screen.MONTEUR) })
-    }
-}
-
-@Composable
-private fun ProjectsScreen(navigate: (Screen) -> Unit) {
-    ScreenColumn {
-        Text("Aktuelle Projekte", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        ProjectCard("Wohnhaus Müller", "Kassel · Montage heute", "Montage", { navigate(Screen.PROJECT) })
-        ProjectCard("Küche Schneider", "Baunatal · Donnerstag", "Vorbereitung", { navigate(Screen.PROJECT) })
-        ProjectCard("Fenster Kita Sonnenschein", "Wolfhagen · nächste Woche", "Bestellt", { navigate(Screen.PROJECT) })
-    }
-}
-
-@Composable
-private fun ProjectScreen(navigate: (Screen) -> Unit) {
-    val context = LocalContext.current
-    ScreenColumn {
-        Text("Wohnhaus Müller", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        Text("Montage · Kassel", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
-        StatusCard("Navigation", "Friedrichstraße 12, Kassel", Icons.Default.Navigation, null) {
-            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=Friedrichstraße+12,+Kassel")))
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Box(Modifier.weight(1f)) { SmallAction("Anrufen", Icons.Default.Phone) { context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:+49561123456"))) } }
-            Box(Modifier.weight(1f)) { SmallAction("E-Mail", Icons.Default.Email) { context.startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:kunde@example.de"))) } }
-        }
-        Text("Baustelle", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-        ActionGridItem("Monteurmodus", Icons.Default.Engineering) { navigate(Screen.MONTEUR) }
-        ActionGridItem("Dokumente", Icons.Default.Description) { navigate(Screen.DOCUMENTS) }
-        ActionGridItem("Fotos", Icons.Default.PhotoCamera) { navigate(Screen.SCANNER) }
-        ActionGridItem("Material", Icons.Default.Inventory2) { navigate(Screen.MATERIAL) }
-        ActionGridItem("Rapport", Icons.Default.EditNote) { navigate(Screen.MONTEUR) }
-    }
-}
-
-@Composable
-private fun MonteurScreen() {
-    var step by remember { mutableIntStateOf(0) }
-    val steps = listOf("Navigation", "Ankommen", "Rapport", "Material", "Fotos", "Unterschrift", "Fertig")
-    ScreenColumn {
-        Text("Wohnhaus Müller", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        Text("Schritt ${step + 1} von ${steps.size}", color = MaterialTheme.colorScheme.primary)
-        LinearProgressIndicator(progress = { (step + 1f) / steps.size }, modifier = Modifier.fillMaxWidth())
-        steps.forEachIndexed { index, title ->
-            Card(
-                onClick = { if (index <= step + 1) step = index },
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(containerColor = if (index == step) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant)
-            ) {
-                Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(if (index < step) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked, null)
-                    Spacer(Modifier.width(14.dp))
-                    Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                }
+        when {
+            state.loading -> LoadingState()
+            state.error != null -> ErrorState(state.error, refresh)
+            state.dashboard == null -> EmptyState("Noch keine Dashboard-Daten")
+            else -> {
+                val data = state.dashboard
+                Text("Guten Morgen", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                data.todayProject?.let { project ->
+                    StatusCard(
+                        title = project.title,
+                        subtitle = listOf(project.customerName, project.address).filter { it.isNotBlank() }.joinToString(" · "),
+                        icon = Icons.Default.HomeWork,
+                        badge = project.status,
+                        onClick = { openProject(project) }
+                    )
+                } ?: EmptyState("Für heute ist kein Projekt hinterlegt.")
+                StatusCard("Aktive Projekte", "Im NextERP vorhanden", Icons.Default.Folder, data.activeProjects.toString(), {})
+                StatusCard("Offene Aufgaben", "Vom Server gemeldet", Icons.Default.CheckCircle, data.openTasks.toString(), {})
+                StatusCard("Neue Dokumente", "Vom Server gemeldet", Icons.Default.Description, data.newDocuments.toString(), {})
+                StatusCard("Offene Rapporte", "Vom Server gemeldet", Icons.Default.EditNote, data.openReports.toString(), {})
             }
         }
-        Button(onClick = { if (step < steps.lastIndex) step++ }, enabled = step < steps.lastIndex, modifier = Modifier.fillMaxWidth().height(56.dp), shape = RoundedCornerShape(18.dp)) {
-            Text(if (step == steps.lastIndex) "Auftrag abgeschlossen" else "Weiter")
+    }
+}
+
+@Composable
+private fun ProjectsScreen(state: DataState, openProject: (ProjectDto) -> Unit, refresh: () -> Unit) {
+    ScreenColumn {
+        Text("Aktuelle Projekte", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        when {
+            state.loading -> LoadingState()
+            state.error != null -> ErrorState(state.error, refresh)
+            state.projects.isEmpty() -> EmptyState("Keine aktiven Projekte im NextERP gefunden.")
+            else -> state.projects.forEach { project ->
+                ProjectCard(project, { openProject(project) })
+            }
         }
     }
 }
 
 @Composable
-private fun MaterialScreen() {
-    ScreenColumn {
-        Text("Material", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        OutlinedTextField("", {}, placeholder = { Text("Material suchen") }, leadingIcon = { Icon(Icons.Default.Search, null) }, modifier = Modifier.fillMaxWidth())
-        StatusCard("Topfband 110°", "Lager: 34 Stück", Icons.Default.Inventory2, "34", {})
-        StatusCard("Spanplattenschraube 4×50", "Lager: 8 Pakete", Icons.Default.Inventory2, "8", {})
-        StatusCard("Montagekleber weiß", "Lager: 3 Kartuschen", Icons.Default.Inventory2, "3", {})
+private fun ProjectScreen(project: ProjectDto?) {
+    if (project == null) {
+        ScreenColumn { EmptyState("Kein Projekt ausgewählt.") }
+        return
     }
-}
-
-@Composable
-private fun DocumentsScreen() {
+    val context = LocalContext.current
     ScreenColumn {
-        Text("Dokumente", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        StatusCard("Montageplan Küche", "PDF · heute", Icons.Default.PictureAsPdf, "Neu", {})
-        StatusCard("Auftragsbestätigung", "PDF · gestern", Icons.Default.Description, null, {})
-        StatusCard("Grundriss Erdgeschoss", "PDF · 02.08.2026", Icons.Default.Map, null, {})
-    }
-}
-
-@Composable
-private fun MoreScreen(logout: () -> Unit) {
-    ScreenColumn {
-        Text("Mehr", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        ActionGridItem("Termine", Icons.Default.CalendarMonth) {}
-        ActionGridItem("Aufgaben", Icons.Default.TaskAlt) {}
-        ActionGridItem("Einstellungen", Icons.Default.Settings) {}
-        ActionGridItem("Abmelden", Icons.Default.Logout, logout)
-    }
-}
-
-@Composable
-private fun PlaceholderScreen(title: String, subtitle: String, icon: ImageVector) {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(icon, null, modifier = Modifier.size(72.dp), tint = MaterialTheme.colorScheme.primary)
-            Spacer(Modifier.height(16.dp))
-            Text(title, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-            Text(subtitle)
+        Text(project.title, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        if (project.projectNo.isNotBlank()) Text(project.projectNo, style = MaterialTheme.typography.labelLarge)
+        if (project.customerName.isNotBlank()) Text(project.customerName)
+        if (project.address.isNotBlank()) Text(project.address)
+        Spacer(Modifier.height(8.dp))
+        AssistChip(onClick = {}, label = { Text(project.status) })
+        Spacer(Modifier.height(12.dp))
+        if (project.address.isNotBlank()) {
+            PrimaryAction("Navigation", Icons.Default.Navigation) {
+                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=${Uri.encode(project.address)}")))
+            }
+        }
+        if (project.phone.isNotBlank()) {
+            PrimaryAction("Anrufen", Icons.Default.Phone) {
+                context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:${project.phone}")))
+            }
+        }
+        if (project.email.isNotBlank()) {
+            PrimaryAction("E-Mail", Icons.Default.Email) {
+                context.startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:${project.email}")))
+            }
         }
     }
 }
 
 @Composable
 private fun ScreenColumn(content: @Composable ColumnScope.() -> Unit) {
-    Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp), content = content)
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        content = content
+    )
 }
 
 @Composable
-private fun StatusCard(title: String, subtitle: String, icon: ImageVector, badge: String? = null, onClick: () -> Unit) {
-    Card(onClick = onClick, modifier = Modifier.fillMaxWidth().heightIn(min = 108.dp), shape = RoundedCornerShape(24.dp)) {
-        Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
-            Surface(shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.primaryContainer) {
-                Icon(icon, null, modifier = Modifier.padding(14.dp).size(30.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
+private fun StatusCard(title: String, subtitle: String, icon: ImageVector, badge: String?, onClick: () -> Unit) {
+    Card(onClick = onClick, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp)) {
+        Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                Icon(icon, null, modifier = Modifier.padding(14.dp).size(26.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
             }
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                Text(subtitle, style = MaterialTheme.typography.bodyMedium)
+                Text(title, fontWeight = FontWeight.SemiBold)
+                Text(subtitle, style = MaterialTheme.typography.bodySmall)
             }
             badge?.let { AssistChip(onClick = {}, label = { Text(it) }) }
         }
@@ -375,36 +530,78 @@ private fun StatusCard(title: String, subtitle: String, icon: ImageVector, badge
 }
 
 @Composable
-private fun ProjectCard(title: String, subtitle: String, status: String, onClick: () -> Unit) {
-    Card(onClick = onClick, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
-        Column(Modifier.padding(20.dp)) {
-            Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(4.dp))
-            Text(subtitle)
-            Spacer(Modifier.height(12.dp))
-            AssistChip(onClick = {}, label = { Text(status) }, leadingIcon = { Icon(Icons.Default.Circle, null, Modifier.size(10.dp)) })
+private fun ProjectCard(project: ProjectDto, onClick: () -> Unit) {
+    Card(onClick = onClick, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp)) {
+        Column(Modifier.fillMaxWidth().padding(18.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Folder, null)
+                Spacer(Modifier.width(10.dp))
+                Text(project.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            }
+            if (project.customerName.isNotBlank()) Text(project.customerName, style = MaterialTheme.typography.bodyMedium)
+            if (project.address.isNotBlank()) Text(project.address, style = MaterialTheme.typography.bodySmall)
+            Spacer(Modifier.height(8.dp))
+            AssistChip(onClick = {}, label = { Text(project.status) })
         }
     }
 }
 
 @Composable
-private fun SmallAction(title: String, icon: ImageVector, onClick: () -> Unit) {
-    FilledTonalButton(onClick = onClick, modifier = Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(18.dp)) {
+private fun PrimaryAction(label: String, icon: ImageVector, onClick: () -> Unit) {
+    FilledTonalButton(onClick = onClick, modifier = Modifier.fillMaxWidth().height(56.dp), shape = RoundedCornerShape(18.dp)) {
         Icon(icon, null)
-        Spacer(Modifier.width(8.dp))
-        Text(title)
+        Spacer(Modifier.width(10.dp))
+        Text(label, fontWeight = FontWeight.SemiBold)
     }
 }
 
 @Composable
-private fun ActionGridItem(title: String, icon: ImageVector, onClick: () -> Unit) {
-    Card(onClick = onClick, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
-        Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(icon, null, tint = MaterialTheme.colorScheme.primary)
-            Spacer(Modifier.width(14.dp))
-            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.weight(1f))
-            Icon(Icons.Default.ChevronRight, null)
+private fun LoadingState() {
+    Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+        CircularProgressIndicator()
+    }
+}
+
+@Composable
+private fun ErrorState(message: String, refresh: () -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+        Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Daten konnten nicht geladen werden", fontWeight = FontWeight.Bold)
+            Text(message)
+            Button(onClick = refresh) { Icon(Icons.Default.Refresh, null); Spacer(Modifier.width(8.dp)); Text("Erneut versuchen") }
+        }
+    }
+}
+
+@Composable
+private fun EmptyState(message: String) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(Icons.Default.Info, null, modifier = Modifier.size(36.dp))
+            Spacer(Modifier.height(10.dp))
+            Text(message, style = MaterialTheme.typography.bodyLarge)
+        }
+    }
+}
+
+@Composable
+private fun PlaceholderScreen(title: String, subtitle: String, icon: ImageVector) {
+    ScreenColumn {
+        Icon(icon, null, modifier = Modifier.size(54.dp), tint = MaterialTheme.colorScheme.primary)
+        Text(title, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Text(subtitle)
+    }
+}
+
+@Composable
+private fun MoreScreen(logout: () -> Unit) {
+    ScreenColumn {
+        Text("Mehr", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Text("NextERP Mobile 0.9.0")
+        OutlinedButton(onClick = logout, modifier = Modifier.fillMaxWidth()) {
+            Icon(Icons.Default.Logout, null)
+            Spacer(Modifier.width(8.dp))
+            Text("Abmelden")
         }
     }
 }
