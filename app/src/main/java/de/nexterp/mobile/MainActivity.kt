@@ -80,7 +80,17 @@ data class MaterialDto(
     val barcode: String,
     val unit: String,
     val stockQuantity: Double,
-    val minimumStock: Double
+    val minimumStock: Double,
+    val salePrice: Double
+)
+
+data class TimeMaterialPosition(
+    val materialId: Int? = null,
+    val articleNo: String = "",
+    val name: String = "",
+    val quantity: String = "1",
+    val unit: String = "Stk.",
+    val unitPrice: Double = 0.0
 )
 
 data class DataState(
@@ -102,6 +112,7 @@ data class TimeEntryState(
     val breakMinutes: String = "30",
     val activity: String = "Montage",
     val note: String = "",
+    val materials: List<TimeMaterialPosition> = listOf(TimeMaterialPosition()),
     val saving: Boolean = false,
     val success: String? = null,
     val error: String? = null
@@ -166,6 +177,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun openTimeEntry() {
         timeEntryState = TimeEntryState()
         screen = Screen.TIME_ENTRY
+        loadMaterials("")
     }
 
     fun updateTimeDate(value: String) { timeEntryState = timeEntryState.copy(workDate = value, success = null, error = null) }
@@ -174,6 +186,44 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun updateBreakMinutes(value: String) { timeEntryState = timeEntryState.copy(breakMinutes = value.filter(Char::isDigit), success = null, error = null) }
     fun updateActivity(value: String) { timeEntryState = timeEntryState.copy(activity = value, success = null, error = null) }
     fun updateTimeNote(value: String) { timeEntryState = timeEntryState.copy(note = value, success = null, error = null) }
+
+    fun addTimeMaterialPosition() {
+        timeEntryState = timeEntryState.copy(
+            materials = timeEntryState.materials + TimeMaterialPosition(),
+            success = null,
+            error = null
+        )
+    }
+
+    fun removeTimeMaterialPosition(index: Int) {
+        val updated = timeEntryState.materials.toMutableList()
+        if (index !in updated.indices) return
+        updated.removeAt(index)
+        if (updated.isEmpty()) updated += TimeMaterialPosition()
+        timeEntryState = timeEntryState.copy(materials = updated, success = null, error = null)
+    }
+
+    fun selectTimeMaterial(index: Int, material: MaterialDto) {
+        val updated = timeEntryState.materials.toMutableList()
+        if (index !in updated.indices) return
+        updated[index] = TimeMaterialPosition(
+            materialId = material.id,
+            articleNo = material.articleNo,
+            name = material.name,
+            quantity = updated[index].quantity.ifBlank { "1" },
+            unit = material.unit.ifBlank { "Stk." },
+            unitPrice = material.salePrice
+        )
+        timeEntryState = timeEntryState.copy(materials = updated, success = null, error = null)
+    }
+
+    fun updateTimeMaterialQuantity(index: Int, value: String) {
+        val normalized = value.filter { it.isDigit() || it == ',' || it == '.' }.replace(',', '.')
+        val updated = timeEntryState.materials.toMutableList()
+        if (index !in updated.indices) return
+        updated[index] = updated[index].copy(quantity = normalized)
+        timeEntryState = timeEntryState.copy(materials = updated, success = null, error = null)
+    }
 
     fun saveTimeEntry() {
         val project = dataState.selectedProject ?: run {
@@ -197,8 +247,30 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 append(" · Pause ").append(timeEntryState.breakMinutes.ifBlank { "0" }).append(" Min.")
                 if (timeEntryState.note.isNotBlank()) append(" · ").append(timeEntryState.note.trim())
             }
+            val materialPositions = timeEntryState.materials.mapNotNull { position ->
+                val materialId = position.materialId ?: return@mapNotNull null
+                val quantity = position.quantity.toDoubleOrNull() ?: return@mapNotNull null
+                if (quantity <= 0.0) return@mapNotNull null
+                TimeMaterialPosition(
+                    materialId = materialId,
+                    articleNo = position.articleNo,
+                    name = position.name,
+                    quantity = quantity.toString(),
+                    unit = position.unit,
+                    unitPrice = position.unitPrice
+                )
+            }
             val result = authorizedRequest { token ->
-                NextErpApi.createTime(loginState.server, token, project.id, timeEntryState.workDate, hours, details)
+                NextErpApi.createTime(
+                    loginState.server,
+                    token,
+                    project.id,
+                    timeEntryState.workDate,
+                    hours,
+                    timeEntryState.activity.ifBlank { "Arbeit" },
+                    details,
+                    materialPositions
+                )
             }
             if (result.isSuccess) {
                 timeEntryState = timeEntryState.copy(saving = false, success = "${formatHours(hours)} Stunden gespeichert.", error = null)
@@ -470,7 +542,9 @@ object NextErpApi {
         projectId: Int,
         workDate: String,
         hours: Double,
-        activity: String
+        activity: String,
+        note: String,
+        materials: List<TimeMaterialPosition>
     ): Result<JSONObject> = runCatching {
         request(
             server = server,
@@ -482,6 +556,18 @@ object NextErpApi {
                 .put("workDate", workDate)
                 .put("hours", hours)
                 .put("activity", activity)
+                .put("note", note)
+                .put("materials", org.json.JSONArray().apply {
+                    materials.forEach { position ->
+                        put(JSONObject()
+                            .put("materialId", position.materialId)
+                            .put("description", position.name)
+                            .put("quantity", position.quantity.toDoubleOrNull() ?: 0.0)
+                            .put("unit", position.unit)
+                            .put("unitPrice", position.unitPrice)
+                        )
+                    }
+                })
         ) as? JSONObject ?: error("Ungültige Antwort der Zeiterfassung.")
     }
 
@@ -629,7 +715,7 @@ private fun AppShell(vm: AppViewModel) {
                 Screen.TODAY -> TodayScreen(vm.dataState, vm::openProject, vm::refresh)
                 Screen.PROJECTS -> ProjectsScreen(vm.dataState, vm::openProject, vm::refresh)
                 Screen.PROJECT -> ProjectScreen(vm.dataState.selectedProject, vm::openTimeEntry)
-                Screen.TIME_ENTRY -> TimeEntryScreen(vm.dataState.selectedProject, vm.timeEntryState, vm)
+                Screen.TIME_ENTRY -> TimeEntryScreen(vm.dataState.selectedProject, vm.timeEntryState, vm.dataState.materials, vm.dataState.materialsLoading, vm)
                 Screen.SCANNER -> PlaceholderScreen("Scanner", "Dokumente und QR-Codes folgen im nächsten Ausbau.", Icons.Default.QrCodeScanner)
                 Screen.MATERIAL -> MaterialScreen(vm.dataState, vm::loadMaterials)
                 Screen.DOCUMENTS -> PlaceholderScreen("Dokumente", "Projektunterlagen werden im nächsten Schritt geladen.", Icons.Default.Description)
@@ -750,10 +836,18 @@ private fun ProjectScreen(project: ProjectDto?, openTimeEntry: () -> Unit) {
 }
 
 @Composable
-private fun TimeEntryScreen(project: ProjectDto?, state: TimeEntryState, vm: AppViewModel) {
+private fun TimeEntryScreen(
+    project: ProjectDto?,
+    state: TimeEntryState,
+    availableMaterials: List<MaterialDto>,
+    materialsLoading: Boolean,
+    vm: AppViewModel
+) {
     if (project == null) { ScreenColumn { EmptyState("Kein Projekt ausgewählt.") }; return }
     val hours = calculateHours(state.fromTime, state.toTime, state.breakMinutes)
     val activities = listOf("Montage", "Service", "Reparatur", "Aufmaß", "Werkstatt", "Planung", "Anfahrt", "Sonstiges")
+    var pickerIndex by remember { mutableStateOf<Int?>(null) }
+    var materialQuery by remember { mutableStateOf("") }
 
     ScreenColumn {
         Text(project.projectName, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -823,6 +917,81 @@ private fun TimeEntryScreen(project: ProjectDto?, state: TimeEntryState, vm: App
             }
         }
 
+        Card(shape = RoundedCornerShape(22.dp), modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Inventory2, null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("Material für die Abrechnung", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        Text("Jede Position wird zusammen mit der Arbeitszeit gespeichert.", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+
+                state.materials.forEachIndexed { index, position ->
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                        shape = RoundedCornerShape(18.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("Position ${index + 1}", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                                if (state.materials.size > 1 || position.materialId != null) {
+                                    IconButton(onClick = { vm.removeTimeMaterialPosition(index) }) {
+                                        Icon(Icons.Default.Delete, "Position entfernen")
+                                    }
+                                }
+                            }
+                            OutlinedButton(
+                                onClick = { pickerIndex = index; materialQuery = "" },
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 54.dp),
+                                shape = RoundedCornerShape(16.dp)
+                            ) {
+                                Icon(Icons.Default.Search, null)
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    if (position.materialId == null) "Material auswählen"
+                                    else listOf(position.articleNo, position.name).filter { it.isNotBlank() }.joinToString(" · "),
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            if (position.materialId != null) {
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    OutlinedTextField(
+                                        value = position.quantity,
+                                        onValueChange = { vm.updateTimeMaterialQuantity(index, it) },
+                                        label = { Text("Menge") },
+                                        singleLine = true,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Text(position.unit.ifBlank { "Stk." }, fontWeight = FontWeight.SemiBold)
+                                }
+                                val quantity = position.quantity.toDoubleOrNull() ?: 0.0
+                                if (position.unitPrice > 0.0) {
+                                    Text(
+                                        "Abrechnungswert: ${formatMoney(quantity * position.unitPrice)}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                FilledTonalButton(
+                    onClick = vm::addTimeMaterialPosition,
+                    modifier = Modifier.fillMaxWidth().height(54.dp),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Icon(Icons.Default.Add, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Weitere Materialposition")
+                }
+            }
+        }
+
         Card(
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
             shape = RoundedCornerShape(22.dp),
@@ -848,8 +1017,56 @@ private fun TimeEntryScreen(project: ProjectDto?, state: TimeEntryState, vm: App
             shape = RoundedCornerShape(18.dp)
         ) {
             if (state.saving) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
-            else { Icon(Icons.Default.Save, null); Spacer(Modifier.width(10.dp)); Text("Zeit speichern", fontWeight = FontWeight.Bold) }
+            else { Icon(Icons.Default.Save, null); Spacer(Modifier.width(10.dp)); Text("Zeit und Material speichern", fontWeight = FontWeight.Bold) }
         }
+    }
+
+    pickerIndex?.let { index ->
+        AlertDialog(
+            onDismissRequest = { pickerIndex = null },
+            title = { Text("Material auswählen") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = materialQuery,
+                        onValueChange = { materialQuery = it },
+                        label = { Text("Suche") },
+                        leadingIcon = { Icon(Icons.Default.Search, null) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (materialsLoading) {
+                        LoadingState()
+                    } else {
+                        val filtered = availableMaterials.filter { material ->
+                            materialQuery.isBlank() || listOf(material.name, material.articleNo, material.barcode)
+                                .any { it.contains(materialQuery, ignoreCase = true) }
+                        }.take(30)
+                        Column(
+                            Modifier.fillMaxWidth().heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            if (filtered.isEmpty()) Text("Kein Material gefunden.")
+                            filtered.forEach { material ->
+                                Card(
+                                    onClick = { vm.selectTimeMaterial(index, material); pickerIndex = null },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(14.dp)
+                                ) {
+                                    Column(Modifier.padding(12.dp)) {
+                                        Text(material.name, fontWeight = FontWeight.Bold)
+                                        val details = listOf(material.articleNo, material.unit).filter { it.isNotBlank() }.joinToString(" · ")
+                                        if (details.isNotBlank()) Text(details, style = MaterialTheme.typography.bodySmall)
+                                        Text("Bestand ${material.stockQuantity} ${material.unit}", style = MaterialTheme.typography.bodySmall)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { pickerIndex = null }) { Text("Schließen") } }
+        )
     }
 }
 
@@ -977,6 +1194,7 @@ private fun calculateHours(from: String, to: String, breakMinutes: String): Doub
 }
 
 private fun formatHours(hours: Double): String = String.format(java.util.Locale.GERMANY, "%.2f", hours)
+private fun formatMoney(value: Double): String = java.text.NumberFormat.getCurrencyInstance(java.util.Locale.GERMANY).format(value)
 
 private fun roleLabel(role: String): String = when (role.lowercase()) {
     "administrator", "admin" -> "Administrator"; "office" -> "Büro"; "manager" -> "Projektleiter"; "employee" -> "Monteur"; else -> role
