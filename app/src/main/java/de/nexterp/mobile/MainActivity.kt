@@ -132,7 +132,20 @@ private fun LoginScreen(state: LoginState, vm: LoginViewModel) {
 @Composable
 private fun Dashboard(name: String, logout: () -> Unit) {
     Scaffold(
-        topBar = { TopAppBar(title = { Column { Text("Heute", fontWeight = FontWeight.Bold); Text(name, style = MaterialTheme.typography.bodySmall) } }, actions = { IconButton(onClick = logout) { Icon(Icons.Default.Logout, "Abmelden") } }) },
+        topBar = {
+            Surface(tonalElevation = 2.dp) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Heute", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        Text(name, style = MaterialTheme.typography.bodySmall)
+                    }
+                    IconButton(onClick = logout) { Icon(Icons.Default.Logout, "Abmelden") }
+                }
+            }
+        },
         bottomBar = { NavigationBar { listOf(Icons.Default.Home to "Heute", Icons.Default.Folder to "Projekte", Icons.Default.QrCodeScanner to "Scanner", Icons.Default.Inventory2 to "Material", Icons.Default.Description to "Dokumente").forEachIndexed { i, item -> NavigationBarItem(selected = i == 0, onClick = {}, icon = { Icon(item.first, item.second) }, label = { Text(item.second) }) } } }
     ) { padding ->
         Column(Modifier.padding(padding).padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
