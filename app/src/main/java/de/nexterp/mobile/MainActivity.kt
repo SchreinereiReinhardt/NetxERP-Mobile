@@ -73,10 +73,22 @@ data class ProjectDto(
     val progress: Int
 )
 
+data class MaterialDto(
+    val id: Int,
+    val articleNo: String,
+    val name: String,
+    val barcode: String,
+    val unit: String,
+    val stockQuantity: Double,
+    val minimumStock: Double
+)
+
 data class DataState(
     val loading: Boolean = false,
     val dashboard: DashboardData? = null,
     val projects: List<ProjectDto> = emptyList(),
+    val materials: List<MaterialDto> = emptyList(),
+    val materialsLoading: Boolean = false,
     val selectedProject: ProjectDto? = null,
     val error: String? = null
 )
@@ -305,9 +317,24 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             loading = false,
             dashboard = dashboardResult.getOrNull(),
             projects = projectsResult.getOrNull().orEmpty(),
+            materials = dataState.materials,
+            materialsLoading = dataState.materialsLoading,
             selectedProject = dataState.selectedProject,
             error = null
         )
+    }
+
+    fun loadMaterials(query: String = "") {
+        if (!loginState.loggedIn || accessToken.isBlank()) return
+        viewModelScope.launch {
+            dataState = dataState.copy(materialsLoading = true, error = null)
+            val result = authorizedRequest { token -> NextErpApi.materials(loginState.server, token, query) }
+            dataState = if (result.isSuccess) {
+                dataState.copy(materials = result.getOrNull().orEmpty(), materialsLoading = false, error = null)
+            } else {
+                dataState.copy(materialsLoading = false, error = result.exceptionOrNull()?.message ?: "Material konnte nicht geladen werden.")
+            }
+        }
     }
 
     private suspend fun <T> authorizedRequest(block: suspend (String) -> Result<T>): Result<T> {
@@ -428,6 +455,15 @@ object NextErpApi {
         }
     }
 
+    suspend fun materials(server: String, token: String, query: String = ""): Result<List<MaterialDto>> = runCatching {
+        val suffix = if (query.isBlank()) "" else "?q=${java.net.URLEncoder.encode(query, "UTF-8")}"
+        when (val data = request(server, "/material$suffix", token = token)) {
+            is org.json.JSONArray -> data.toMaterials()
+            is JSONObject -> data.optJSONArray("materials").toMaterials()
+            else -> emptyList()
+        }
+    }
+
     suspend fun createTime(
         server: String,
         token: String,
@@ -497,6 +533,25 @@ object NextErpApi {
         color = optString("color", "#546E7A"),
         progress = optInt("progress", 0)
     )
+
+    private fun org.json.JSONArray?.toMaterials(): List<MaterialDto> {
+        if (this == null) return emptyList()
+        return buildList {
+            for (i in 0 until length()) {
+                optJSONObject(i)?.let { json ->
+                    add(MaterialDto(
+                        id = json.optInt("id"),
+                        articleNo = json.optString("article_no", json.optString("articleNo")),
+                        name = json.optString("name", "Material"),
+                        barcode = json.optString("barcode"),
+                        unit = json.optString("unit", "Stk."),
+                        stockQuantity = json.optDouble("stock_quantity", json.optDouble("stockQuantity", 0.0)),
+                        minimumStock = json.optDouble("minimum_stock", json.optDouble("minimumStock", 0.0))
+                    ))
+                }
+            }
+        }
+    }
 
     private fun apiMessage(json: JSONObject, fallback: String): String {
         val message = json.optString("message")
@@ -576,7 +631,7 @@ private fun AppShell(vm: AppViewModel) {
                 Screen.PROJECT -> ProjectScreen(vm.dataState.selectedProject, vm::openTimeEntry)
                 Screen.TIME_ENTRY -> TimeEntryScreen(vm.dataState.selectedProject, vm.timeEntryState, vm)
                 Screen.SCANNER -> PlaceholderScreen("Scanner", "Dokumente und QR-Codes folgen im nächsten Ausbau.", Icons.Default.QrCodeScanner)
-                Screen.MATERIAL -> PlaceholderScreen("Material", "Die Materialsuche wird als Nächstes an /material angebunden.", Icons.Default.Inventory2)
+                Screen.MATERIAL -> MaterialScreen(vm.dataState, vm::loadMaterials)
                 Screen.DOCUMENTS -> PlaceholderScreen("Dokumente", "Projektunterlagen werden im nächsten Schritt geladen.", Icons.Default.Description)
                 Screen.MORE -> MoreScreen(vm.loginState, vm::logout)
             }
@@ -686,10 +741,10 @@ private fun ProjectScreen(project: ProjectDto?, openTimeEntry: () -> Unit) {
         if (project.address.isNotBlank()) PrimaryAction("Navigation", Icons.Default.Navigation) { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=${Uri.encode(project.address)}"))) }
         if (project.phone.isNotBlank()) PrimaryAction("Anrufen", Icons.Default.Phone) { context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:${project.phone}"))) }
         if (project.email.isNotBlank()) PrimaryAction("E-Mail", Icons.Default.Email) { context.startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:${project.email}"))) }
+        PrimaryAction("Arbeitszeit eintragen", Icons.Default.Schedule, openTimeEntry)
+        PrimaryAction("Material", Icons.Default.Inventory2) {}
         PrimaryAction("Dokumente", Icons.Default.Description) {}
         PrimaryAction("Fotos", Icons.Default.PhotoCamera) {}
-        PrimaryAction("Material", Icons.Default.Inventory2) {}
-        PrimaryAction("Zeiten erfassen", Icons.Default.Schedule, openTimeEntry)
         PrimaryAction("Rapport", Icons.Default.EditNote) {}
     }
 }
@@ -815,6 +870,47 @@ private fun ProjectCard(project: ProjectDto, onClick: () -> Unit) {
             LinearProgressIndicator(progress = { project.progress.coerceIn(0, 100) / 100f }, modifier = Modifier.fillMaxWidth())
             Spacer(Modifier.height(8.dp))
             AssistChip(onClick = {}, label = { Text(project.status) })
+            Text("Tippen für Navigation, Arbeitszeit und Material", style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+@Composable
+private fun MaterialScreen(state: DataState, loadMaterials: (String) -> Unit) {
+    var query by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) { loadMaterials("") }
+    ScreenColumn {
+        Text("Material", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            label = { Text("Artikel, Bezeichnung oder Barcode") },
+            leadingIcon = { Icon(Icons.Default.Search, null) },
+            trailingIcon = { IconButton(onClick = { loadMaterials(query) }) { Icon(Icons.Default.Search, "Suchen") } },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Button(onClick = { loadMaterials(query) }, modifier = Modifier.fillMaxWidth()) {
+            Icon(Icons.Default.Search, null); Spacer(Modifier.width(8.dp)); Text("Material suchen")
+        }
+        when {
+            state.materialsLoading -> LoadingState()
+            state.error != null -> ErrorState(state.error) { loadMaterials(query) }
+            state.materials.isEmpty() -> EmptyState("Kein Material gefunden.")
+            else -> state.materials.forEach { material -> MaterialCard(material) }
+        }
+    }
+}
+
+@Composable
+private fun MaterialCard(material: MaterialDto) {
+    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Text(material.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            if (material.articleNo.isNotBlank()) Text("Artikel ${material.articleNo}", style = MaterialTheme.typography.bodySmall)
+            if (material.barcode.isNotBlank()) Text("Barcode ${material.barcode}", style = MaterialTheme.typography.bodySmall)
+            val stockText = String.format(java.util.Locale.GERMANY, "%.2f %s", material.stockQuantity, material.unit)
+            Text("Bestand: $stockText", fontWeight = FontWeight.SemiBold, color = if (material.stockQuantity <= material.minimumStock) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
         }
     }
 }
