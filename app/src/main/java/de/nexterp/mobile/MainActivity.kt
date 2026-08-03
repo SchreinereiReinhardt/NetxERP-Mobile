@@ -84,6 +84,18 @@ data class MaterialDto(
     val salePrice: Double
 )
 
+data class DocumentDto(
+    val id: Int,
+    val projectId: Int,
+    val documentType: String,
+    val fileName: String,
+    val filePath: String,
+    val mimeType: String,
+    val status: String,
+    val createdBy: String,
+    val createdAt: String
+)
+
 data class TimeMaterialPosition(
     val materialId: Int? = null,
     val articleNo: String = "",
@@ -99,6 +111,10 @@ data class DataState(
     val projects: List<ProjectDto> = emptyList(),
     val materials: List<MaterialDto> = emptyList(),
     val materialsLoading: Boolean = false,
+    val documents: List<DocumentDto> = emptyList(),
+    val documentsLoading: Boolean = false,
+    val documentsProjectId: Int? = null,
+    val documentsError: String? = null,
     val selectedProject: ProjectDto? = null,
     val error: String? = null
 )
@@ -172,6 +188,41 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun openProject(project: ProjectDto) {
         dataState = dataState.copy(selectedProject = project)
         screen = Screen.PROJECT
+    }
+
+    fun openProjectDocuments(project: ProjectDto) {
+        dataState = dataState.copy(selectedProject = project)
+        screen = Screen.DOCUMENTS
+        loadProjectDocuments(project.id)
+    }
+
+    fun loadProjectDocuments(projectId: Int) {
+        viewModelScope.launch {
+            dataState = dataState.copy(
+                documentsLoading = true,
+                documentsProjectId = projectId,
+                documentsError = null
+            )
+            val result = authorizedRequest { token ->
+                NextErpApi.projectDocuments(loginState.server, token, projectId)
+            }
+            dataState = if (result.isSuccess) {
+                dataState.copy(
+                    documents = result.getOrNull().orEmpty(),
+                    documentsLoading = false,
+                    documentsProjectId = projectId,
+                    documentsError = null
+                )
+            } else {
+                dataState.copy(
+                    documents = emptyList(),
+                    documentsLoading = false,
+                    documentsProjectId = projectId,
+                    documentsError = result.exceptionOrNull()?.message
+                        ?: "Dokumente konnten nicht geladen werden."
+                )
+            }
+        }
     }
 
     fun openTimeEntry() {
@@ -536,6 +587,19 @@ object NextErpApi {
         }
     }
 
+
+    suspend fun projectDocuments(
+        server: String,
+        token: String,
+        projectId: Int
+    ): Result<List<DocumentDto>> = runCatching {
+        when (val data = request(server, "/project/$projectId/documents", token = token)) {
+            is org.json.JSONArray -> data.toDocuments()
+            is JSONObject -> data.optJSONArray("documents").toDocuments()
+            else -> emptyList()
+        }
+    }
+
     suspend fun createTime(
         server: String,
         token: String,
@@ -640,6 +704,47 @@ object NextErpApi {
         }
     }
 
+    private fun org.json.JSONArray?.toDocuments(): List<DocumentDto> {
+        if (this == null) return emptyList()
+        return buildList {
+            for (i in 0 until length()) {
+                optJSONObject(i)?.let { json ->
+                    add(
+                        DocumentDto(
+                            id = json.optInt("id"),
+                            projectId = json.optInt("project_id", json.optInt("projectId")),
+                            documentType = json.optString(
+                                "document_type",
+                                json.optString("documentType", "other")
+                            ),
+                            fileName = json.optString(
+                                "file_name",
+                                json.optString("fileName", "Dokument")
+                            ),
+                            filePath = json.optString(
+                                "file_path",
+                                json.optString("filePath")
+                            ),
+                            mimeType = json.optString(
+                                "mime_type",
+                                json.optString("mimeType", "application/octet-stream")
+                            ),
+                            status = json.optString("status"),
+                            createdBy = json.optString(
+                                "created_by",
+                                json.optString("createdBy")
+                            ),
+                            createdAt = json.optString(
+                                "created_at",
+                                json.optString("createdAt")
+                            )
+                        )
+                    )
+                }
+            }
+        }
+    }
+
     private fun apiMessage(json: JSONObject, fallback: String): String {
         val message = json.optString("message")
         if (message.isNotBlank()) return message
@@ -715,11 +820,24 @@ private fun AppShell(vm: AppViewModel) {
             when (vm.screen) {
                 Screen.TODAY -> TodayScreen(vm.dataState, vm::openProject, vm::refresh)
                 Screen.PROJECTS -> ProjectsScreen(vm.dataState, vm::openProject, vm::refresh)
-                Screen.PROJECT -> ProjectScreen(vm.dataState.selectedProject, vm::openTimeEntry)
+                Screen.PROJECT -> ProjectScreen(
+                    project = vm.dataState.selectedProject,
+                    openTimeEntry = vm::openTimeEntry,
+                    openDocuments = {
+                        vm.dataState.selectedProject?.let(vm::openProjectDocuments)
+                    }
+                )
                 Screen.TIME_ENTRY -> TimeEntryScreen(vm.dataState.selectedProject, vm.timeEntryState, vm.dataState.materials, vm.dataState.materialsLoading, vm)
                 Screen.SCANNER -> PlaceholderScreen("Scanner", "Dokumente und QR-Codes folgen im nächsten Ausbau.", Icons.Default.QrCodeScanner)
                 Screen.MATERIAL -> MaterialScreen(vm.dataState, vm::loadMaterials)
-                Screen.DOCUMENTS -> PlaceholderScreen("Dokumente", "Projektunterlagen werden im nächsten Schritt geladen.", Icons.Default.Description)
+                Screen.DOCUMENTS -> DocumentsScreen(
+                    state = vm.dataState,
+                    server = vm.loginState.server,
+                    selectProject = vm::openProjectDocuments,
+                    refresh = {
+                        vm.dataState.selectedProject?.let { vm.loadProjectDocuments(it.id) }
+                    }
+                )
                 Screen.MORE -> MoreScreen(vm.loginState, vm::logout)
             }
         }
@@ -815,7 +933,11 @@ private fun ProjectsScreen(state: DataState, openProject: (ProjectDto) -> Unit, 
 }
 
 @Composable
-private fun ProjectScreen(project: ProjectDto?, openTimeEntry: () -> Unit) {
+private fun ProjectScreen(
+    project: ProjectDto?,
+    openTimeEntry: () -> Unit,
+    openDocuments: () -> Unit
+) {
     if (project == null) { ScreenColumn { EmptyState("Kein Projekt ausgewählt.") }; return }
     val context = LocalContext.current
     ScreenColumn {
@@ -830,7 +952,7 @@ private fun ProjectScreen(project: ProjectDto?, openTimeEntry: () -> Unit) {
         if (project.email.isNotBlank()) PrimaryAction("E-Mail", Icons.Default.Email) { context.startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:${project.email}"))) }
         PrimaryAction("Arbeitszeit eintragen", Icons.Default.Schedule, openTimeEntry)
         PrimaryAction("Material", Icons.Default.Inventory2) {}
-        PrimaryAction("Dokumente", Icons.Default.Description) {}
+        PrimaryAction("Dokumente", Icons.Default.Description, openDocuments)
         PrimaryAction("Fotos", Icons.Default.PhotoCamera) {}
         PrimaryAction("Rapport", Icons.Default.EditNote) {}
     }
@@ -1162,6 +1284,195 @@ private fun EmptyState(message: String) {
 }
 
 @Composable
+private fun DocumentsScreen(
+    state: DataState,
+    server: String,
+    selectProject: (ProjectDto) -> Unit,
+    refresh: () -> Unit
+) {
+    val context = LocalContext.current
+    var search by remember { mutableStateOf("") }
+    val project = state.selectedProject
+
+    ScreenColumn {
+        Text("Dokumente", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+
+        if (project == null) {
+            Text("Zuerst ein Projekt auswählen.", style = MaterialTheme.typography.bodyLarge)
+            if (state.projects.isEmpty()) {
+                EmptyState("Keine Projekte verfügbar.")
+            } else {
+                state.projects.forEach { item ->
+                    Card(
+                        onClick = { selectProject(item) },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(20.dp)
+                    ) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Default.Folder, null, tint = parseColor(item.color))
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(item.projectName, fontWeight = FontWeight.Bold)
+                                if (item.projectNo.isNotBlank()) {
+                                    Text(item.projectNo, style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+                            Icon(Icons.Default.ChevronRight, null)
+                        }
+                    }
+                }
+            }
+            return@ScreenColumn
+        }
+
+        Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
+            Row(
+                Modifier.fillMaxWidth().padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.FolderOpen, null, tint = parseColor(project.color))
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(project.projectName, fontWeight = FontWeight.Bold)
+                    if (project.projectNo.isNotBlank()) {
+                        Text(project.projectNo, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                IconButton(onClick = refresh) {
+                    Icon(Icons.Default.Refresh, "Dokumente aktualisieren")
+                }
+            }
+        }
+
+        OutlinedTextField(
+            value = search,
+            onValueChange = { search = it },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Dokument suchen") },
+            leadingIcon = { Icon(Icons.Default.Search, null) },
+            singleLine = true
+        )
+
+        when {
+            state.documentsLoading -> LoadingState()
+            state.documentsError != null -> ErrorState(state.documentsError, refresh)
+            else -> {
+                val filtered = state.documents.filter { document ->
+                    search.isBlank() ||
+                        document.fileName.contains(search, ignoreCase = true) ||
+                        document.documentType.contains(search, ignoreCase = true) ||
+                        document.mimeType.contains(search, ignoreCase = true)
+                }
+
+                if (filtered.isEmpty()) {
+                    EmptyState(
+                        if (search.isBlank()) "Keine Dokumente in diesem Projekt."
+                        else "Keine passenden Dokumente gefunden."
+                    )
+                } else {
+                    Text(
+                        "${filtered.size} Dokumente",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    filtered.forEach { document ->
+                        DocumentCard(
+                            document = document,
+                            onOpen = {
+                                val cleanServer = server.trim().trimEnd('/')
+                                val directory = document.filePath
+                                    .substringBeforeLast('/', "")
+                                    .let { if (it.startsWith("/")) it else "/$it" }
+                                val target = buildString {
+                                    append(cleanServer)
+                                    append("/index.php/apps/files/?dir=")
+                                    append(Uri.encode(directory))
+                                    if (document.fileName.isNotBlank()) {
+                                        append("&scrollto=")
+                                        append(Uri.encode(document.fileName))
+                                    }
+                                }
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(target)))
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DocumentCard(document: DocumentDto, onOpen: () -> Unit) {
+    val icon = when {
+        document.mimeType == "application/pdf" ||
+            document.fileName.endsWith(".pdf", ignoreCase = true) -> Icons.Default.PictureAsPdf
+        document.mimeType.startsWith("image/") -> Icons.Default.Image
+        else -> Icons.Default.Description
+    }
+
+    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
+        Column(
+            Modifier.fillMaxWidth().padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer
+                ) {
+                    Icon(
+                        icon,
+                        null,
+                        Modifier.padding(12.dp).size(28.dp),
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        document.fileName,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(documentTypeLabel(document), style = MaterialTheme.typography.bodySmall)
+                }
+            }
+
+            val details = listOf(
+                document.createdAt.takeIf { it.isNotBlank() },
+                document.createdBy.takeIf { it.isNotBlank() }
+            ).filterNotNull().joinToString(" · ")
+
+            if (details.isNotBlank()) {
+                Text(details, style = MaterialTheme.typography.bodySmall)
+            }
+
+            FilledTonalButton(
+                onClick = onOpen,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.OpenInNew, null)
+                Spacer(Modifier.width(8.dp))
+                Text("In Nextcloud öffnen")
+            }
+        }
+    }
+}
+
+private fun documentTypeLabel(document: DocumentDto): String = when {
+    document.mimeType == "application/pdf" ||
+        document.fileName.endsWith(".pdf", ignoreCase = true) -> "PDF"
+    document.mimeType.startsWith("image/") -> "Bild"
+    document.documentType == "photo" -> "Foto"
+    document.documentType == "scan" -> "Scan"
+    else -> document.documentType.ifBlank { "Dokument" }
+}
+
+@Composable
 private fun PlaceholderScreen(title: String, subtitle: String, icon: ImageVector) {
     ScreenColumn { Icon(icon, null, Modifier.size(54.dp), tint = MaterialTheme.colorScheme.primary); Text(title, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold); Text(subtitle) }
 }
@@ -1172,7 +1483,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
         Text("Mehr", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Text(login.displayName, fontWeight = FontWeight.Bold)
         Text(roleLabel(login.role))
-        Text("NextERP Mobile 1.2.0 · API v1")
+        Text("NextERP Mobile 1.3.0 · API v1")
         OutlinedButton(onClick = logout, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Logout, null); Spacer(Modifier.width(8.dp)); Text("Abmelden") }
     }
 }
