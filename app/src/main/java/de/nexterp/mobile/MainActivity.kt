@@ -16,22 +16,21 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import de.nexterp.mobile.ui.theme.NextERPTheme
 import java.net.HttpURLConnection
 import java.net.URL
-import java.nio.charset.StandardCharsets
-import java.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
 import org.json.JSONObject
 
 enum class Screen { TODAY, PROJECTS, PROJECT, SCANNER, MATERIAL, DOCUMENTS, MORE }
@@ -41,30 +40,36 @@ data class LoginState(
     val username: String = "",
     val password: String = "",
     val loading: Boolean = false,
+    val restoring: Boolean = true,
     val loggedIn: Boolean = false,
     val displayName: String = "",
+    val role: String = "",
     val error: String? = null
 )
 
 data class DashboardData(
-    val displayName: String = "",
-    val role: String = "monteur",
-    val activeProjects: Int = 0,
-    val openTasks: Int = 0,
-    val newDocuments: Int = 0,
-    val openReports: Int = 0,
-    val todayProject: ProjectDto? = null
+    val projectsToday: Int = 0,
+    val tasks: Int = 0,
+    val documents: Int = 0,
+    val reportsOpen: Int = 0,
+    val todayHours: Double = 0.0,
+    val recentProjects: List<ProjectDto> = emptyList()
 )
 
 data class ProjectDto(
     val id: Int,
     val projectNo: String,
-    val title: String,
+    val projectName: String,
+    val customer: String,
     val status: String,
-    val customerName: String,
+    val startDate: String?,
+    val dueDate: String?,
     val address: String,
+    val contactName: String,
     val phone: String,
-    val email: String
+    val email: String,
+    val color: String,
+    val progress: Int
 )
 
 data class DataState(
@@ -73,6 +78,15 @@ data class DataState(
     val projects: List<ProjectDto> = emptyList(),
     val selectedProject: ProjectDto? = null,
     val error: String? = null
+)
+
+data class SessionData(
+    val accessToken: String,
+    val refreshToken: String,
+    val displayName: String,
+    val username: String,
+    val role: String,
+    val expiresIn: Int
 )
 
 class MainActivity : ComponentActivity() {
@@ -85,10 +99,16 @@ class MainActivity : ComponentActivity() {
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val prefs = application.getSharedPreferences("nexterp_session", 0)
 
+    private var accessToken: String = prefs.getString("access_token", "").orEmpty()
+    private var refreshToken: String = prefs.getString("refresh_token", "").orEmpty()
+
     var loginState by mutableStateOf(
         LoginState(
             server = prefs.getString("server", "https://cloud.kassel-net.de") ?: "https://cloud.kassel-net.de",
-            username = prefs.getString("username", "") ?: ""
+            username = prefs.getString("username", "") ?: "",
+            displayName = prefs.getString("display_name", "") ?: "",
+            role = prefs.getString("role", "") ?: "",
+            restoring = true
         )
     )
         private set
@@ -99,10 +119,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     var screen by mutableStateOf(Screen.TODAY)
         private set
 
+    init {
+        viewModelScope.launch { restoreSession() }
+    }
+
     fun updateServer(value: String) { loginState = loginState.copy(server = value) }
     fun updateUsername(value: String) { loginState = loginState.copy(username = value) }
     fun updatePassword(value: String) { loginState = loginState.copy(password = value) }
-
     fun navigate(target: Screen) { screen = target }
 
     fun openProject(project: ProjectDto) {
@@ -110,57 +133,93 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         screen = Screen.PROJECT
     }
 
-    fun logout() {
-        loginState = LoginState(server = loginState.server, username = loginState.username)
-        dataState = DataState()
-        screen = Screen.TODAY
-    }
-
-    suspend fun login() {
-        if (loginState.username.isBlank() || loginState.password.isBlank()) {
-            loginState = loginState.copy(error = "Benutzer und App-Passwort eingeben.")
+    private suspend fun restoreSession() {
+        if (accessToken.isBlank() && refreshToken.isBlank()) {
+            loginState = loginState.copy(restoring = false)
             return
         }
-
-        loginState = loginState.copy(loading = true, error = null)
-        val auth = NextcloudApi.checkLogin(loginState.server, loginState.username, loginState.password)
-        if (auth.isFailure) {
-            loginState = loginState.copy(
-                loading = false,
-                error = auth.exceptionOrNull()?.message ?: "Anmeldung fehlgeschlagen"
-            )
+        loginState = loginState.copy(loading = true, restoring = true, error = null)
+        val bootstrap = authorizedRequest { token -> NextErpApi.bootstrap(loginState.server, token) }
+        if (bootstrap.isFailure) {
+            clearSession()
+            loginState = loginState.copy(loading = false, restoring = false, loggedIn = false)
             return
         }
-
-        val displayName = auth.getOrNull().orEmpty()
-        prefs.edit()
-            .putString("server", loginState.server.trimEnd('/'))
-            .putString("username", loginState.username)
-            .apply()
-
+        val data = bootstrap.getOrThrow()
+        val user = data.optJSONObject("user") ?: JSONObject()
         loginState = loginState.copy(
             loading = false,
+            restoring = false,
             loggedIn = true,
-            displayName = displayName,
+            displayName = user.optString("displayName", loginState.displayName),
+            username = user.optString("username", loginState.username),
+            role = data.optString("role", loginState.role),
             error = null
         )
         refresh()
     }
 
-    suspend fun refresh() {
-        if (!loginState.loggedIn || loginState.password.isBlank()) return
-        dataState = dataState.copy(loading = true, error = null)
+    suspend fun login() {
+        if (loginState.server.isBlank() || loginState.username.isBlank() || loginState.password.isBlank()) {
+            loginState = loginState.copy(error = "Server, Benutzer und Passwort eingeben.")
+            return
+        }
+        loginState = loginState.copy(loading = true, error = null)
+        val result = NextErpApi.login(
+            loginState.server,
+            loginState.username.trim(),
+            loginState.password,
+            "NextERP Android"
+        )
+        if (result.isFailure) {
+            loginState = loginState.copy(
+                loading = false,
+                password = "",
+                error = result.exceptionOrNull()?.message ?: "Anmeldung fehlgeschlagen."
+            )
+            return
+        }
+        val session = result.getOrThrow()
+        accessToken = session.accessToken
+        refreshToken = session.refreshToken
+        prefs.edit()
+            .putString("server", normalizeServer(loginState.server))
+            .putString("username", session.username)
+            .putString("display_name", session.displayName)
+            .putString("role", session.role)
+            .putString("access_token", accessToken)
+            .putString("refresh_token", refreshToken)
+            .apply()
 
-        val dashboardResult = NextcloudApi.loadDashboard(
-            loginState.server,
-            loginState.username,
-            loginState.password
+        loginState = loginState.copy(
+            server = normalizeServer(loginState.server),
+            username = session.username,
+            password = "",
+            loading = false,
+            restoring = false,
+            loggedIn = true,
+            displayName = session.displayName,
+            role = session.role,
+            error = null
         )
-        val projectsResult = NextcloudApi.loadProjects(
-            loginState.server,
-            loginState.username,
-            loginState.password
-        )
+        refresh()
+    }
+
+    fun logout() {
+        viewModelScope.launch {
+            if (accessToken.isNotBlank()) NextErpApi.logout(loginState.server, accessToken)
+            clearSession()
+            dataState = DataState()
+            screen = Screen.TODAY
+            loginState = LoginState(server = loginState.server, username = loginState.username, restoring = false)
+        }
+    }
+
+    suspend fun refresh() {
+        if (!loginState.loggedIn || accessToken.isBlank()) return
+        dataState = dataState.copy(loading = true, error = null)
+        val dashboardResult = authorizedRequest { token -> NextErpApi.dashboard(loginState.server, token) }
+        val projectsResult = authorizedRequest { token -> NextErpApi.projects(loginState.server, token) }
 
         if (dashboardResult.isFailure || projectsResult.isFailure) {
             val message = dashboardResult.exceptionOrNull()?.message
@@ -178,101 +237,205 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             error = null
         )
     }
-}
 
-object NextcloudApi {
-    private fun basicAuth(user: String, password: String): String {
-        val raw = "$user:$password".toByteArray(StandardCharsets.UTF_8)
-        return "Basic ${Base64.getEncoder().encodeToString(raw)}"
+    private suspend fun <T> authorizedRequest(block: suspend (String) -> Result<T>): Result<T> {
+        var result = block(accessToken)
+        if (result.exceptionOrNull() is ApiUnauthorizedException && refreshToken.isNotBlank()) {
+            val refreshed = NextErpApi.refresh(loginState.server, refreshToken)
+            if (refreshed.isSuccess) {
+                val session = refreshed.getOrThrow()
+                accessToken = session.accessToken
+                refreshToken = session.refreshToken
+                prefs.edit()
+                    .putString("access_token", accessToken)
+                    .putString("refresh_token", refreshToken)
+                    .putString("display_name", session.displayName)
+                    .putString("role", session.role)
+                    .apply()
+                result = block(accessToken)
+            }
+        }
+        return result
     }
 
-    private suspend fun getJson(
+    private fun clearSession() {
+        accessToken = ""
+        refreshToken = ""
+        prefs.edit().remove("access_token").remove("refresh_token").remove("display_name").remove("role").apply()
+    }
+
+    private fun normalizeServer(server: String): String = server.trim().trimEnd('/')
+}
+
+class ApiUnauthorizedException(message: String) : RuntimeException(message)
+
+object NextErpApi {
+    private fun apiBase(server: String): String {
+        val clean = server.trim().trimEnd('/')
+        require(clean.startsWith("https://")) { "Bitte eine HTTPS-Serveradresse verwenden." }
+        return "$clean/index.php/apps/reinhardterp/api/mobile/v1"
+    }
+
+    private suspend fun request(
         server: String,
         path: String,
-        user: String,
-        password: String,
-        ocs: Boolean = false
-    ): JSONObject = withContext(Dispatchers.IO) {
-        val base = server.trim().trimEnd('/')
-        require(base.startsWith("https://")) { "Bitte eine HTTPS-Serveradresse verwenden." }
-        val connection = (URL("$base$path").openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
+        method: String = "GET",
+        token: String? = null,
+        body: JSONObject? = null
+    ): Any = withContext(Dispatchers.IO) {
+        val connection = (URL(apiBase(server) + path).openConnection() as HttpURLConnection).apply {
+            requestMethod = method
             connectTimeout = 15_000
-            readTimeout = 15_000
+            readTimeout = 20_000
             setRequestProperty("Accept", "application/json")
-            setRequestProperty("Authorization", basicAuth(user, password))
-            if (ocs) setRequestProperty("OCS-APIRequest", "true")
+            setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            token?.takeIf { it.isNotBlank() }?.let { setRequestProperty("Authorization", "Bearer $it") }
+            if (body != null) {
+                doOutput = true
+                outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(body.toString()) }
+            }
         }
         try {
             val code = connection.responseCode
-            if (code !in 200..299) {
-                val detail = when (code) {
-                    401 -> "Anmeldung abgelehnt. Bitte App-Passwort prüfen."
-                    404 -> "Die NextERP-Mobile-API ist auf dem Server noch nicht installiert."
-                    else -> "Serverfehler HTTP $code."
-                }
-                error(detail)
-            }
-            val body = connection.inputStream.bufferedReader().use { it.readText() }
-            JSONObject(body)
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            val json = if (text.isBlank()) JSONObject() else JSONObject(text)
+            if (code == 401) throw ApiUnauthorizedException(apiMessage(json, "Anmeldung abgelaufen."))
+            if (code !in 200..299) error(apiMessage(json, "Serverfehler HTTP $code."))
+            if (!json.optBoolean("success", false)) error(apiMessage(json, "NextERP meldet einen Fehler."))
+            json.opt("data") ?: JSONObject.NULL
         } finally {
             connection.disconnect()
         }
     }
 
-    suspend fun checkLogin(server: String, user: String, password: String): Result<String> = runCatching {
-        val json = getJson(server, "/ocs/v2.php/cloud/user?format=json", user, password, ocs = true)
-        json.optJSONObject("ocs")
-            ?.optJSONObject("data")
-            ?.optString("displayname")
-            ?.takeIf { it.isNotBlank() }
-            ?: user
+    suspend fun login(server: String, username: String, password: String, deviceName: String): Result<SessionData> = runCatching {
+        val data = request(
+            server,
+            "/login",
+            "POST",
+            body = JSONObject()
+                .put("username", username)
+                .put("password", password)
+                .put("deviceName", deviceName)
+        ) as? JSONObject ?: error("Ungültige Login-Antwort.")
+        data.toSession()
     }
 
-    suspend fun loadDashboard(server: String, user: String, password: String): Result<DashboardData> = runCatching {
-        val json = getJson(server, "/index.php/apps/reinhardterp/api/mobile/v1/dashboard", user, password)
-        val userJson = json.optJSONObject("user") ?: JSONObject()
-        val cards = json.optJSONObject("cards") ?: JSONObject()
-        val today = json.optJSONObject("todayProject")
+    suspend fun refresh(server: String, refreshToken: String): Result<SessionData> = runCatching {
+        (request(server, "/refresh", "POST", body = JSONObject().put("refreshToken", refreshToken)) as? JSONObject
+            ?: error("Ungültige Refresh-Antwort.")).toSession()
+    }
+
+    suspend fun logout(server: String, token: String): Result<Unit> = runCatching {
+        request(server, "/logout", "POST", token)
+        Unit
+    }
+
+    suspend fun bootstrap(server: String, token: String): Result<JSONObject> = runCatching {
+        request(server, "/bootstrap", token = token) as? JSONObject ?: error("Ungültige Bootstrap-Antwort.")
+    }
+
+    suspend fun dashboard(server: String, token: String): Result<DashboardData> = runCatching {
+        val data = request(server, "/dashboard", token = token) as? JSONObject ?: error("Ungültige Dashboard-Antwort.")
         DashboardData(
-            displayName = userJson.optString("displayName", user),
-            role = userJson.optString("role", "monteur"),
-            activeProjects = cards.optInt("activeProjects", 0),
-            openTasks = cards.optInt("openTasks", 0),
-            newDocuments = cards.optInt("newDocuments", 0),
-            openReports = cards.optInt("openReports", 0),
-            todayProject = today?.takeIf { it.length() > 0 }?.toProject()
+            projectsToday = data.optInt("projectsToday", 0),
+            tasks = data.optInt("tasks", 0),
+            documents = data.optInt("documents", 0),
+            reportsOpen = data.optInt("reportsOpen", 0),
+            todayHours = data.optDouble("todayHours", 0.0),
+            recentProjects = data.optJSONArray("recentProjects").toProjects()
         )
     }
 
-    suspend fun loadProjects(server: String, user: String, password: String): Result<List<ProjectDto>> = runCatching {
-        val json = getJson(server, "/index.php/apps/reinhardterp/api/mobile/v1/projects", user, password)
-        val array = json.optJSONArray("projects") ?: JSONArray()
-        buildList {
-            for (i in 0 until array.length()) {
-                add(array.getJSONObject(i).toProject())
-            }
+    suspend fun projects(server: String, token: String): Result<List<ProjectDto>> = runCatching {
+        when (val data = request(server, "/projects", token = token)) {
+            is org.json.JSONArray -> data.toProjects()
+            is JSONObject -> data.toProjectsFromUnknownShape()
+            else -> emptyList()
+        }
+    }
+
+    private fun JSONObject.toSession(): SessionData {
+        val user = optJSONObject("user") ?: JSONObject()
+        return SessionData(
+            accessToken = optString("accessToken").also { require(it.isNotBlank()) { "Access-Token fehlt." } },
+            refreshToken = optString("refreshToken").also { require(it.isNotBlank()) { "Refresh-Token fehlt." } },
+            displayName = user.optString("displayName", user.optString("username")),
+            username = user.optString("username", user.optString("id")),
+            role = optString("role", "employee"),
+            expiresIn = optInt("expiresIn", 3600)
+        )
+    }
+
+    private fun JSONObject.toProjectsFromUnknownShape(): List<ProjectDto> {
+        // Der aktuelle Server liefert direkt ein JSON-Array in data. Einige Hotfix-Stände
+        // liefern alternativ {projects:[...]}. Beide Varianten werden unterstützt.
+        val wrapped = optJSONArray("projects")
+        if (wrapped != null) return wrapped.toProjects()
+        val indexed = mutableListOf<ProjectDto>()
+        var index = 0
+        while (has(index.toString())) {
+            optJSONObject(index.toString())?.let { indexed += it.toProject() }
+            index++
+        }
+        return indexed
+    }
+
+    private fun org.json.JSONArray?.toProjects(): List<ProjectDto> {
+        if (this == null) return emptyList()
+        return buildList {
+            for (i in 0 until length()) optJSONObject(i)?.let { add(it.toProject()) }
         }
     }
 
     private fun JSONObject.toProject(): ProjectDto = ProjectDto(
         id = optInt("id"),
         projectNo = optString("projectNo"),
-        title = optString("title", "Projekt"),
+        projectName = optString("projectName", optString("title", "Projekt")),
+        customer = optString("customer", optString("customerName")),
         status = optString("status", "offen"),
-        customerName = optString("customerName"),
+        startDate = optString("startDate").takeIf { it.isNotBlank() },
+        dueDate = optString("dueDate").takeIf { it.isNotBlank() },
         address = optString("address"),
+        contactName = optString("contactName"),
         phone = optString("phone"),
-        email = optString("email")
+        email = optString("email"),
+        color = optString("color", "#546E7A"),
+        progress = optInt("progress", 0)
     )
+
+    private fun apiMessage(json: JSONObject, fallback: String): String {
+        val message = json.optString("message")
+        if (message.isNotBlank()) return message
+        val errors = json.optJSONArray("errors")
+        return if (errors != null && errors.length() > 0) errors.optString(0, fallback) else fallback
+    }
 }
 
 @Composable
 fun NextERPApp(vm: AppViewModel = viewModel()) {
-    if (!vm.loginState.loggedIn) {
-        LoginScreen(vm.loginState, vm)
-    } else {
-        AppShell(vm)
+    when {
+        vm.loginState.restoring -> SplashScreen()
+        !vm.loginState.loggedIn -> LoginScreen(vm.loginState, vm)
+        else -> AppShell(vm)
+    }
+}
+
+@Composable
+private fun SplashScreen() {
+    Surface(Modifier.fillMaxSize()) {
+        Column(
+            Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Icon(Icons.Default.Handyman, null, Modifier.size(64.dp), tint = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.height(18.dp))
+            Text("NextERP Mobile", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(20.dp))
+            CircularProgressIndicator()
+        }
     }
 }
 
@@ -285,68 +448,25 @@ private fun LoginScreen(state: LoginState, vm: AppViewModel) {
             verticalArrangement = Arrangement.Center
         ) {
             Surface(shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.primaryContainer) {
-                Icon(
-                    Icons.Default.Handyman,
-                    contentDescription = null,
-                    modifier = Modifier.padding(18.dp).size(44.dp),
-                    tint = MaterialTheme.colorScheme.onPrimaryContainer
-                )
+                Icon(Icons.Default.Handyman, null, Modifier.padding(18.dp).size(44.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
             }
             Spacer(Modifier.height(20.dp))
             Text("NextERP Mobile", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
-            Text("Alles, was du heute auf der Baustelle brauchst.", style = MaterialTheme.typography.bodyLarge)
+            Text("Deine Baustelle. Genau jetzt.", style = MaterialTheme.typography.bodyLarge)
             Spacer(Modifier.height(28.dp))
-            OutlinedTextField(
-                state.server,
-                vm::updateServer,
-                label = { Text("Nextcloud-Server") },
-                leadingIcon = { Icon(Icons.Default.Cloud, null) },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
+            OutlinedTextField(state.server, vm::updateServer, label = { Text("Nextcloud-Server") }, leadingIcon = { Icon(Icons.Default.Cloud, null) }, singleLine = true, modifier = Modifier.fillMaxWidth())
             Spacer(Modifier.height(12.dp))
-            OutlinedTextField(
-                state.username,
-                vm::updateUsername,
-                label = { Text("Benutzer") },
-                leadingIcon = { Icon(Icons.Default.Person, null) },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
+            OutlinedTextField(state.username, vm::updateUsername, label = { Text("Benutzer") }, leadingIcon = { Icon(Icons.Default.Person, null) }, singleLine = true, modifier = Modifier.fillMaxWidth())
             Spacer(Modifier.height(12.dp))
-            OutlinedTextField(
-                state.password,
-                vm::updatePassword,
-                label = { Text("App-Passwort") },
-                leadingIcon = { Icon(Icons.Default.Lock, null) },
-                visualTransformation = PasswordVisualTransformation(),
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
-            state.error?.let {
-                Spacer(Modifier.height(12.dp))
-                Text(it, color = MaterialTheme.colorScheme.error)
-            }
+            OutlinedTextField(state.password, vm::updatePassword, label = { Text("Passwort oder App-Passwort") }, leadingIcon = { Icon(Icons.Default.Lock, null) }, visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth())
+            state.error?.let { Spacer(Modifier.height(12.dp)); Text(it, color = MaterialTheme.colorScheme.error) }
             Spacer(Modifier.height(20.dp))
-            Button(
-                onClick = { scope.launch { vm.login() } },
-                enabled = !state.loading,
-                modifier = Modifier.fillMaxWidth().height(58.dp),
-                shape = RoundedCornerShape(18.dp)
-            ) {
-                if (state.loading) {
-                    CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
-                } else {
-                    Icon(Icons.Default.Login, null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Anmelden", fontWeight = FontWeight.SemiBold)
-                }
+            Button(onClick = { scope.launch { vm.login() } }, enabled = !state.loading, modifier = Modifier.fillMaxWidth().height(58.dp), shape = RoundedCornerShape(18.dp)) {
+                if (state.loading) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                else { Icon(Icons.Default.Login, null); Spacer(Modifier.width(8.dp)); Text("Anmelden", fontWeight = FontWeight.SemiBold) }
             }
             Spacer(Modifier.height(10.dp))
-            Text(
-                "Es werden keine Testdaten angezeigt. Nach der Anmeldung lädt die App ausschließlich Daten aus NextERP.",
-                style = MaterialTheme.typography.bodySmall
-            )
+            Text("Anmeldung direkt an der NextERP Mobile API v1. Keine Testdaten.", style = MaterialTheme.typography.bodySmall)
         }
     }
 }
@@ -355,49 +475,33 @@ private fun LoginScreen(state: LoginState, vm: AppViewModel) {
 private fun AppShell(vm: AppViewModel) {
     val scope = rememberCoroutineScope()
     Scaffold(
-        topBar = {
-            AppHeader(
-                name = vm.loginState.displayName,
-                screen = vm.screen,
-                onRefresh = { scope.launch { vm.refresh() } },
-                onLogout = vm::logout
-            )
-        },
+        topBar = { AppHeader(vm.loginState.displayName, vm.loginState.role, vm.screen, { scope.launch { vm.refresh() } }, vm::logout) },
         bottomBar = { AppBottomBar(vm.screen, vm::navigate) }
     ) { padding ->
-        Box(Modifier.padding(padding).fillMaxSize()) {
+        Box(Modifier.padding(padding)) {
             when (vm.screen) {
-                Screen.TODAY -> TodayScreen(vm.dataState, vm::openProject, { scope.launch { vm.refresh() } })
-                Screen.PROJECTS -> ProjectsScreen(vm.dataState, vm::openProject, { scope.launch { vm.refresh() } })
+                Screen.TODAY -> TodayScreen(vm.dataState, vm::openProject) { scope.launch { vm.refresh() } }
+                Screen.PROJECTS -> ProjectsScreen(vm.dataState, vm::openProject) { scope.launch { vm.refresh() } }
                 Screen.PROJECT -> ProjectScreen(vm.dataState.selectedProject)
-                Screen.SCANNER -> PlaceholderScreen("Scanner", "Dokumente und Barcodes erfassen", Icons.Default.QrCodeScanner)
-                Screen.MATERIAL -> PlaceholderScreen("Material", "Noch keine Materialdaten vom Server", Icons.Default.Inventory2)
-                Screen.DOCUMENTS -> PlaceholderScreen("Dokumente", "Noch keine Dokumentdaten vom Server", Icons.Default.Description)
-                Screen.MORE -> MoreScreen(vm::logout)
+                Screen.SCANNER -> PlaceholderScreen("Scanner", "Dokumente und QR-Codes folgen im nächsten Ausbau.", Icons.Default.QrCodeScanner)
+                Screen.MATERIAL -> PlaceholderScreen("Material", "Die Materialsuche wird als Nächstes an /material angebunden.", Icons.Default.Inventory2)
+                Screen.DOCUMENTS -> PlaceholderScreen("Dokumente", "Projektunterlagen werden im nächsten Schritt geladen.", Icons.Default.Description)
+                Screen.MORE -> MoreScreen(vm.loginState, vm::logout)
             }
         }
     }
 }
 
 @Composable
-private fun AppHeader(name: String, screen: Screen, onRefresh: () -> Unit, onLogout: () -> Unit) {
+private fun AppHeader(name: String, role: String, screen: Screen, onRefresh: () -> Unit, onLogout: () -> Unit) {
     val title = when (screen) {
-        Screen.TODAY -> "Heute"
-        Screen.PROJECTS -> "Projekte"
-        Screen.PROJECT -> "Projekt"
-        Screen.SCANNER -> "Scanner"
-        Screen.MATERIAL -> "Material"
-        Screen.DOCUMENTS -> "Dokumente"
-        Screen.MORE -> "Mehr"
+        Screen.TODAY -> "Heute"; Screen.PROJECTS -> "Projekte"; Screen.PROJECT -> "Projekt"; Screen.SCANNER -> "Scanner"; Screen.MATERIAL -> "Material"; Screen.DOCUMENTS -> "Dokumente"; Screen.MORE -> "Mehr"
     }
     Surface(tonalElevation = 2.dp) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text(name, style = MaterialTheme.typography.bodySmall)
+                Text(listOf(name, roleLabel(role)).filter { it.isNotBlank() }.joinToString(" · "), style = MaterialTheme.typography.bodySmall)
             }
             IconButton(onClick = onRefresh) { Icon(Icons.Default.Refresh, "Aktualisieren") }
             IconButton(onClick = onLogout) { Icon(Icons.Default.Logout, "Abmelden") }
@@ -408,21 +512,11 @@ private fun AppHeader(name: String, screen: Screen, onRefresh: () -> Unit, onLog
 @Composable
 private fun AppBottomBar(selected: Screen, navigate: (Screen) -> Unit) {
     val items = listOf(
-        Triple(Screen.TODAY, Icons.Default.Home, "Heute"),
-        Triple(Screen.PROJECTS, Icons.Default.Folder, "Projekte"),
-        Triple(Screen.SCANNER, Icons.Default.QrCodeScanner, "Scanner"),
-        Triple(Screen.MATERIAL, Icons.Default.Inventory2, "Material"),
-        Triple(Screen.DOCUMENTS, Icons.Default.Description, "Dokumente"),
-        Triple(Screen.MORE, Icons.Default.MoreHoriz, "Mehr")
+        Triple(Screen.TODAY, Icons.Default.Home, "Heute"), Triple(Screen.PROJECTS, Icons.Default.Folder, "Projekte"), Triple(Screen.SCANNER, Icons.Default.QrCodeScanner, "Scanner"), Triple(Screen.MATERIAL, Icons.Default.Inventory2, "Material"), Triple(Screen.DOCUMENTS, Icons.Default.Description, "Dokumente"), Triple(Screen.MORE, Icons.Default.MoreHoriz, "Mehr")
     )
     NavigationBar {
         items.forEach { (screen, icon, label) ->
-            NavigationBarItem(
-                selected = selected == screen || (selected == Screen.PROJECT && screen == Screen.PROJECTS),
-                onClick = { navigate(screen) },
-                icon = { Icon(icon, label) },
-                label = { Text(label) }
-            )
+            NavigationBarItem(selected = selected == screen || (selected == Screen.PROJECT && screen == Screen.PROJECTS), onClick = { navigate(screen) }, icon = { Icon(icon, label) }, label = { Text(label) })
         }
     }
 }
@@ -436,21 +530,39 @@ private fun TodayScreen(state: DataState, openProject: (ProjectDto) -> Unit, ref
             state.dashboard == null -> EmptyState("Noch keine Dashboard-Daten")
             else -> {
                 val data = state.dashboard
-                Text("Guten Morgen", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                data.todayProject?.let { project ->
-                    StatusCard(
-                        title = project.title,
-                        subtitle = listOf(project.customerName, project.address).filter { it.isNotBlank() }.joinToString(" · "),
-                        icon = Icons.Default.HomeWork,
-                        badge = project.status,
-                        onClick = { openProject(project) }
-                    )
-                } ?: EmptyState("Für heute ist kein Projekt hinterlegt.")
-                StatusCard("Aktive Projekte", "Im NextERP vorhanden", Icons.Default.Folder, data.activeProjects.toString(), {})
-                StatusCard("Offene Aufgaben", "Vom Server gemeldet", Icons.Default.CheckCircle, data.openTasks.toString(), {})
-                StatusCard("Neue Dokumente", "Vom Server gemeldet", Icons.Default.Description, data.newDocuments.toString(), {})
-                StatusCard("Offene Rapporte", "Vom Server gemeldet", Icons.Default.EditNote, data.openReports.toString(), {})
+                Text("Heute", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                MetricGrid(data)
+                Text("Aktuelle Projekte", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                if (data.recentProjects.isEmpty()) EmptyState("Keine aktiven Projekte gefunden.")
+                else data.recentProjects.take(4).forEach { project -> ProjectCard(project) { openProject(project) } }
             }
+        }
+    }
+}
+
+@Composable
+private fun MetricGrid(data: DashboardData) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            MetricCard("Projekte heute", data.projectsToday.toString(), Icons.Default.HomeWork, Modifier.weight(1f))
+            MetricCard("Aufgaben", data.tasks.toString(), Icons.Default.TaskAlt, Modifier.weight(1f))
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            MetricCard("Dokumente", data.documents.toString(), Icons.Default.Description, Modifier.weight(1f))
+            MetricCard("Rapporte", data.reportsOpen.toString(), Icons.Default.EditNote, Modifier.weight(1f))
+        }
+        MetricCard("Stunden heute", String.format(java.util.Locale.GERMANY, "%.1f h", data.todayHours), Icons.Default.Schedule, Modifier.fillMaxWidth())
+    }
+}
+
+@Composable
+private fun MetricCard(title: String, value: String, icon: ImageVector, modifier: Modifier) {
+    Card(modifier = modifier, shape = RoundedCornerShape(22.dp)) {
+        Column(Modifier.padding(16.dp)) {
+            Icon(icon, null, tint = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.height(12.dp))
+            Text(value, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Text(title, style = MaterialTheme.typography.bodySmall)
         }
     }
 }
@@ -463,69 +575,29 @@ private fun ProjectsScreen(state: DataState, openProject: (ProjectDto) -> Unit, 
             state.loading -> LoadingState()
             state.error != null -> ErrorState(state.error, refresh)
             state.projects.isEmpty() -> EmptyState("Keine aktiven Projekte im NextERP gefunden.")
-            else -> state.projects.forEach { project ->
-                ProjectCard(project, { openProject(project) })
-            }
+            else -> state.projects.forEach { project -> ProjectCard(project) { openProject(project) } }
         }
     }
 }
 
 @Composable
 private fun ProjectScreen(project: ProjectDto?) {
-    if (project == null) {
-        ScreenColumn { EmptyState("Kein Projekt ausgewählt.") }
-        return
-    }
+    if (project == null) { ScreenColumn { EmptyState("Kein Projekt ausgewählt.") }; return }
     val context = LocalContext.current
     ScreenColumn {
-        Text(project.title, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Text(project.projectName, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         if (project.projectNo.isNotBlank()) Text(project.projectNo, style = MaterialTheme.typography.labelLarge)
-        if (project.customerName.isNotBlank()) Text(project.customerName)
+        if (project.customer.isNotBlank()) Text(project.customer)
         if (project.address.isNotBlank()) Text(project.address)
-        Spacer(Modifier.height(8.dp))
+        LinearProgressIndicator(progress = { project.progress.coerceIn(0, 100) / 100f }, modifier = Modifier.fillMaxWidth())
         AssistChip(onClick = {}, label = { Text(project.status) })
-        Spacer(Modifier.height(12.dp))
-        if (project.address.isNotBlank()) {
-            PrimaryAction("Navigation", Icons.Default.Navigation) {
-                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=${Uri.encode(project.address)}")))
-            }
-        }
-        if (project.phone.isNotBlank()) {
-            PrimaryAction("Anrufen", Icons.Default.Phone) {
-                context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:${project.phone}")))
-            }
-        }
-        if (project.email.isNotBlank()) {
-            PrimaryAction("E-Mail", Icons.Default.Email) {
-                context.startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:${project.email}")))
-            }
-        }
-    }
-}
-
-@Composable
-private fun ScreenColumn(content: @Composable ColumnScope.() -> Unit) {
-    Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-        content = content
-    )
-}
-
-@Composable
-private fun StatusCard(title: String, subtitle: String, icon: ImageVector, badge: String?, onClick: () -> Unit) {
-    Card(onClick = onClick, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp)) {
-        Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.primaryContainer) {
-                Icon(icon, null, modifier = Modifier.padding(14.dp).size(26.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
-            }
-            Spacer(Modifier.width(14.dp))
-            Column(Modifier.weight(1f)) {
-                Text(title, fontWeight = FontWeight.SemiBold)
-                Text(subtitle, style = MaterialTheme.typography.bodySmall)
-            }
-            badge?.let { AssistChip(onClick = {}, label = { Text(it) }) }
-        }
+        if (project.address.isNotBlank()) PrimaryAction("Navigation", Icons.Default.Navigation) { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=${Uri.encode(project.address)}"))) }
+        if (project.phone.isNotBlank()) PrimaryAction("Anrufen", Icons.Default.Phone) { context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:${project.phone}"))) }
+        if (project.email.isNotBlank()) PrimaryAction("E-Mail", Icons.Default.Email) { context.startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:${project.email}"))) }
+        PrimaryAction("Dokumente", Icons.Default.Description) {}
+        PrimaryAction("Fotos", Icons.Default.PhotoCamera) {}
+        PrimaryAction("Material", Icons.Default.Inventory2) {}
+        PrimaryAction("Rapport", Icons.Default.EditNote) {}
     }
 }
 
@@ -534,12 +606,16 @@ private fun ProjectCard(project: ProjectDto, onClick: () -> Unit) {
     Card(onClick = onClick, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp)) {
         Column(Modifier.fillMaxWidth().padding(18.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.Folder, null)
+                Box(Modifier.size(10.dp))
+                Icon(Icons.Default.Folder, null, tint = parseColor(project.color))
                 Spacer(Modifier.width(10.dp))
-                Text(project.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text(project.projectName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             }
-            if (project.customerName.isNotBlank()) Text(project.customerName, style = MaterialTheme.typography.bodyMedium)
+            if (project.projectNo.isNotBlank()) Text(project.projectNo, style = MaterialTheme.typography.labelSmall)
+            if (project.customer.isNotBlank()) Text(project.customer)
             if (project.address.isNotBlank()) Text(project.address, style = MaterialTheme.typography.bodySmall)
+            Spacer(Modifier.height(8.dp))
+            LinearProgressIndicator(progress = { project.progress.coerceIn(0, 100) / 100f }, modifier = Modifier.fillMaxWidth())
             Spacer(Modifier.height(8.dp))
             AssistChip(onClick = {}, label = { Text(project.status) })
         }
@@ -547,27 +623,23 @@ private fun ProjectCard(project: ProjectDto, onClick: () -> Unit) {
 }
 
 @Composable
-private fun PrimaryAction(label: String, icon: ImageVector, onClick: () -> Unit) {
-    FilledTonalButton(onClick = onClick, modifier = Modifier.fillMaxWidth().height(56.dp), shape = RoundedCornerShape(18.dp)) {
-        Icon(icon, null)
-        Spacer(Modifier.width(10.dp))
-        Text(label, fontWeight = FontWeight.SemiBold)
-    }
+private fun ScreenColumn(content: @Composable ColumnScope.() -> Unit) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp), content = content)
 }
 
 @Composable
-private fun LoadingState() {
-    Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
-        CircularProgressIndicator()
-    }
+private fun PrimaryAction(label: String, icon: ImageVector, onClick: () -> Unit) {
+    FilledTonalButton(onClick = onClick, modifier = Modifier.fillMaxWidth().height(56.dp), shape = RoundedCornerShape(18.dp)) { Icon(icon, null); Spacer(Modifier.width(10.dp)); Text(label, fontWeight = FontWeight.SemiBold) }
 }
+
+@Composable
+private fun LoadingState() { Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
 
 @Composable
 private fun ErrorState(message: String, refresh: () -> Unit) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
         Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("Daten konnten nicht geladen werden", fontWeight = FontWeight.Bold)
-            Text(message)
+            Text("Daten konnten nicht geladen werden", fontWeight = FontWeight.Bold); Text(message)
             Button(onClick = refresh) { Icon(Icons.Default.Refresh, null); Spacer(Modifier.width(8.dp)); Text("Erneut versuchen") }
         }
     }
@@ -575,33 +647,27 @@ private fun ErrorState(message: String, refresh: () -> Unit) {
 
 @Composable
 private fun EmptyState(message: String) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(Icons.Default.Info, null, modifier = Modifier.size(36.dp))
-            Spacer(Modifier.height(10.dp))
-            Text(message, style = MaterialTheme.typography.bodyLarge)
-        }
-    }
+    Card(Modifier.fillMaxWidth()) { Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) { Icon(Icons.Default.Info, null, Modifier.size(36.dp)); Spacer(Modifier.height(10.dp)); Text(message) } }
 }
 
 @Composable
 private fun PlaceholderScreen(title: String, subtitle: String, icon: ImageVector) {
-    ScreenColumn {
-        Icon(icon, null, modifier = Modifier.size(54.dp), tint = MaterialTheme.colorScheme.primary)
-        Text(title, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        Text(subtitle)
-    }
+    ScreenColumn { Icon(icon, null, Modifier.size(54.dp), tint = MaterialTheme.colorScheme.primary); Text(title, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold); Text(subtitle) }
 }
 
 @Composable
-private fun MoreScreen(logout: () -> Unit) {
+private fun MoreScreen(login: LoginState, logout: () -> Unit) {
     ScreenColumn {
         Text("Mehr", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        Text("NextERP Mobile 0.9.0")
-        OutlinedButton(onClick = logout, modifier = Modifier.fillMaxWidth()) {
-            Icon(Icons.Default.Logout, null)
-            Spacer(Modifier.width(8.dp))
-            Text("Abmelden")
-        }
+        Text(login.displayName, fontWeight = FontWeight.Bold)
+        Text(roleLabel(login.role))
+        Text("NextERP Mobile 1.0.0 · API v1")
+        OutlinedButton(onClick = logout, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Logout, null); Spacer(Modifier.width(8.dp)); Text("Abmelden") }
     }
 }
+
+private fun roleLabel(role: String): String = when (role.lowercase()) {
+    "administrator", "admin" -> "Administrator"; "office" -> "Büro"; "manager" -> "Projektleiter"; "employee" -> "Monteur"; else -> role
+}
+
+private fun parseColor(value: String): Color = runCatching { Color(android.graphics.Color.parseColor(value)) }.getOrDefault(Color(0xFF546E7A))
