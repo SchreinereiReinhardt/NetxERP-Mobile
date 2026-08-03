@@ -28,12 +28,13 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import de.nexterp.mobile.ui.theme.NextERPTheme
 import java.net.HttpURLConnection
 import java.net.URL
+import java.time.LocalDate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
-enum class Screen { TODAY, PROJECTS, PROJECT, SCANNER, MATERIAL, DOCUMENTS, MORE }
+enum class Screen { TODAY, PROJECTS, PROJECT, TIME_ENTRY, SCANNER, MATERIAL, DOCUMENTS, MORE }
 
 data class LoginState(
     val server: String = "https://cloud.kassel-net.de",
@@ -47,23 +48,12 @@ data class LoginState(
     val error: String? = null
 )
 
-data class AppointmentDto(
-    val id: Int,
-    val title: String,
-    val startAt: String,
-    val endAt: String,
-    val location: String,
-    val description: String,
-    val projectId: Int?
-)
-
 data class DashboardData(
     val projectsToday: Int = 0,
     val tasks: Int = 0,
     val documents: Int = 0,
     val reportsOpen: Int = 0,
     val todayHours: Double = 0.0,
-    val appointments: List<AppointmentDto> = emptyList(),
     val recentProjects: List<ProjectDto> = emptyList()
 )
 
@@ -88,6 +78,20 @@ data class DataState(
     val dashboard: DashboardData? = null,
     val projects: List<ProjectDto> = emptyList(),
     val selectedProject: ProjectDto? = null,
+    val error: String? = null
+)
+
+
+
+data class TimeEntryState(
+    val workDate: String = LocalDate.now().toString(),
+    val fromTime: String = "08:00",
+    val toTime: String = "16:30",
+    val breakMinutes: String = "30",
+    val activity: String = "Montage",
+    val note: String = "",
+    val saving: Boolean = false,
+    val success: String? = null,
     val error: String? = null
 )
 
@@ -130,6 +134,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     var screen by mutableStateOf(Screen.TODAY)
         private set
 
+    var timeEntryState by mutableStateOf(TimeEntryState())
+        private set
+
     init {
         viewModelScope.launch { restoreSession() }
     }
@@ -142,6 +149,52 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun openProject(project: ProjectDto) {
         dataState = dataState.copy(selectedProject = project)
         screen = Screen.PROJECT
+    }
+
+    fun openTimeEntry() {
+        timeEntryState = TimeEntryState()
+        screen = Screen.TIME_ENTRY
+    }
+
+    fun updateTimeDate(value: String) { timeEntryState = timeEntryState.copy(workDate = value, success = null, error = null) }
+    fun updateFromTime(value: String) { timeEntryState = timeEntryState.copy(fromTime = value, success = null, error = null) }
+    fun updateToTime(value: String) { timeEntryState = timeEntryState.copy(toTime = value, success = null, error = null) }
+    fun updateBreakMinutes(value: String) { timeEntryState = timeEntryState.copy(breakMinutes = value.filter(Char::isDigit), success = null, error = null) }
+    fun updateActivity(value: String) { timeEntryState = timeEntryState.copy(activity = value, success = null, error = null) }
+    fun updateTimeNote(value: String) { timeEntryState = timeEntryState.copy(note = value, success = null, error = null) }
+
+    fun saveTimeEntry() {
+        val project = dataState.selectedProject ?: run {
+            timeEntryState = timeEntryState.copy(error = "Kein Projekt ausgewählt.")
+            return
+        }
+        val hours = calculateHours(timeEntryState.fromTime, timeEntryState.toTime, timeEntryState.breakMinutes)
+        if (hours == null || hours <= 0.0) {
+            timeEntryState = timeEntryState.copy(error = "Bitte gültige Zeiten und Pause eingeben.")
+            return
+        }
+        if (!timeEntryState.workDate.matches(Regex("\\d{4}-\\d{2}-\\d{2}"))) {
+            timeEntryState = timeEntryState.copy(error = "Datum bitte als JJJJ-MM-TT eingeben.")
+            return
+        }
+        viewModelScope.launch {
+            timeEntryState = timeEntryState.copy(saving = true, success = null, error = null)
+            val details = buildString {
+                append(timeEntryState.activity.ifBlank { "Arbeit" })
+                append(" · ").append(timeEntryState.fromTime).append("–").append(timeEntryState.toTime)
+                append(" · Pause ").append(timeEntryState.breakMinutes.ifBlank { "0" }).append(" Min.")
+                if (timeEntryState.note.isNotBlank()) append(" · ").append(timeEntryState.note.trim())
+            }
+            val result = authorizedRequest { token ->
+                NextErpApi.createTime(loginState.server, token, project.id, timeEntryState.workDate, hours, details)
+            }
+            if (result.isSuccess) {
+                timeEntryState = timeEntryState.copy(saving = false, success = "${formatHours(hours)} Stunden gespeichert.", error = null)
+                refreshInternal()
+            } else {
+                timeEntryState = timeEntryState.copy(saving = false, error = result.exceptionOrNull()?.message ?: "Zeit konnte nicht gespeichert werden.")
+            }
+        }
     }
 
     private suspend fun restoreSession() {
@@ -363,7 +416,6 @@ object NextErpApi {
             documents = data.optInt("documents", 0),
             reportsOpen = data.optInt("reportsOpen", 0),
             todayHours = data.optDouble("todayHours", 0.0),
-            appointments = data.optJSONArray("appointments").toAppointments(),
             recentProjects = data.optJSONArray("recentProjects").toProjects()
         )
     }
@@ -374,6 +426,27 @@ object NextErpApi {
             is JSONObject -> data.toProjectsFromUnknownShape()
             else -> emptyList()
         }
+    }
+
+    suspend fun createTime(
+        server: String,
+        token: String,
+        projectId: Int,
+        workDate: String,
+        hours: Double,
+        activity: String
+    ): Result<JSONObject> = runCatching {
+        request(
+            server = server,
+            path = "/time",
+            method = "POST",
+            token = token,
+            body = JSONObject()
+                .put("projectId", projectId)
+                .put("workDate", workDate)
+                .put("hours", hours)
+                .put("activity", activity)
+        ) as? JSONObject ?: error("Ungültige Antwort der Zeiterfassung.")
     }
 
     private fun JSONObject.toSession(): SessionData {
@@ -400,26 +473,6 @@ object NextErpApi {
             index++
         }
         return indexed
-    }
-
-    private fun org.json.JSONArray?.toAppointments(): List<AppointmentDto> {
-        if (this == null) return emptyList()
-        return buildList {
-            for (i in 0 until length()) {
-                val item = optJSONObject(i) ?: continue
-                add(
-                    AppointmentDto(
-                        id = item.optInt("id"),
-                        title = item.optString("title", "Termin"),
-                        startAt = item.optString("start_at"),
-                        endAt = item.optString("end_at"),
-                        location = item.optString("location"),
-                        description = item.optString("description"),
-                        projectId = item.opt("project_id")?.takeUnless { it == JSONObject.NULL }?.toString()?.toIntOrNull()
-                    )
-                )
-            }
-        }
     }
 
     private fun org.json.JSONArray?.toProjects(): List<ProjectDto> {
@@ -520,7 +573,8 @@ private fun AppShell(vm: AppViewModel) {
             when (vm.screen) {
                 Screen.TODAY -> TodayScreen(vm.dataState, vm::openProject, vm::refresh)
                 Screen.PROJECTS -> ProjectsScreen(vm.dataState, vm::openProject, vm::refresh)
-                Screen.PROJECT -> ProjectScreen(vm.dataState.selectedProject)
+                Screen.PROJECT -> ProjectScreen(vm.dataState.selectedProject, vm::openTimeEntry)
+                Screen.TIME_ENTRY -> TimeEntryScreen(vm.dataState.selectedProject, vm.timeEntryState, vm)
                 Screen.SCANNER -> PlaceholderScreen("Scanner", "Dokumente und QR-Codes folgen im nächsten Ausbau.", Icons.Default.QrCodeScanner)
                 Screen.MATERIAL -> PlaceholderScreen("Material", "Die Materialsuche wird als Nächstes an /material angebunden.", Icons.Default.Inventory2)
                 Screen.DOCUMENTS -> PlaceholderScreen("Dokumente", "Projektunterlagen werden im nächsten Schritt geladen.", Icons.Default.Description)
@@ -533,7 +587,7 @@ private fun AppShell(vm: AppViewModel) {
 @Composable
 private fun AppHeader(name: String, role: String, screen: Screen, onRefresh: () -> Unit, onLogout: () -> Unit) {
     val title = when (screen) {
-        Screen.TODAY -> "Heute"; Screen.PROJECTS -> "Projekte"; Screen.PROJECT -> "Projekt"; Screen.SCANNER -> "Scanner"; Screen.MATERIAL -> "Material"; Screen.DOCUMENTS -> "Dokumente"; Screen.MORE -> "Mehr"
+        Screen.TODAY -> "Heute"; Screen.PROJECTS -> "Projekte"; Screen.PROJECT -> "Projekt"; Screen.TIME_ENTRY -> "Zeiten"; Screen.SCANNER -> "Scanner"; Screen.MATERIAL -> "Material"; Screen.DOCUMENTS -> "Dokumente"; Screen.MORE -> "Mehr"
     }
     Surface(tonalElevation = 2.dp) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -570,43 +624,9 @@ private fun TodayScreen(state: DataState, openProject: (ProjectDto) -> Unit, ref
                 val data = state.dashboard
                 Text("Heute", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
                 MetricGrid(data)
-                Text("Meine Termine", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                if (data.appointments.isEmpty()) EmptyState("Heute sind keine Termine eingetragen.")
-                else data.appointments.forEach { appointment -> AppointmentCard(appointment) }
                 Text("Aktuelle Projekte", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 if (data.recentProjects.isEmpty()) EmptyState("Keine aktiven Projekte gefunden.")
                 else data.recentProjects.take(4).forEach { project -> ProjectCard(project) { openProject(project) } }
-            }
-        }
-    }
-}
-
-@Composable
-private fun AppointmentCard(appointment: AppointmentDto) {
-    val context = LocalContext.current
-    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp)) {
-        Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
-                    Icon(Icons.Default.Event, null, Modifier.padding(10.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
-                }
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(appointment.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    Text(formatAppointmentTime(appointment.startAt, appointment.endAt), style = MaterialTheme.typography.bodyMedium)
-                }
-            }
-            if (appointment.location.isNotBlank()) {
-                Text(appointment.location, style = MaterialTheme.typography.bodyMedium)
-                FilledTonalButton(
-                    onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=${Uri.encode(appointment.location)}"))) },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp)
-                ) {
-                    Icon(Icons.Default.Navigation, null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Navigation starten")
-                }
             }
         }
     }
@@ -653,7 +673,7 @@ private fun ProjectsScreen(state: DataState, openProject: (ProjectDto) -> Unit, 
 }
 
 @Composable
-private fun ProjectScreen(project: ProjectDto?) {
+private fun ProjectScreen(project: ProjectDto?, openTimeEntry: () -> Unit) {
     if (project == null) { ScreenColumn { EmptyState("Kein Projekt ausgewählt.") }; return }
     val context = LocalContext.current
     ScreenColumn {
@@ -669,7 +689,112 @@ private fun ProjectScreen(project: ProjectDto?) {
         PrimaryAction("Dokumente", Icons.Default.Description) {}
         PrimaryAction("Fotos", Icons.Default.PhotoCamera) {}
         PrimaryAction("Material", Icons.Default.Inventory2) {}
+        PrimaryAction("Zeiten erfassen", Icons.Default.Schedule, openTimeEntry)
         PrimaryAction("Rapport", Icons.Default.EditNote) {}
+    }
+}
+
+@Composable
+private fun TimeEntryScreen(project: ProjectDto?, state: TimeEntryState, vm: AppViewModel) {
+    if (project == null) { ScreenColumn { EmptyState("Kein Projekt ausgewählt.") }; return }
+    val hours = calculateHours(state.fromTime, state.toTime, state.breakMinutes)
+    val activities = listOf("Montage", "Service", "Reparatur", "Aufmaß", "Werkstatt", "Planung", "Anfahrt", "Sonstiges")
+
+    ScreenColumn {
+        Text(project.projectName, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        if (project.projectNo.isNotBlank()) Text(project.projectNo, style = MaterialTheme.typography.labelLarge)
+
+        Card(shape = RoundedCornerShape(22.dp), modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                Text("Arbeitszeit eintragen", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                OutlinedTextField(
+                    value = state.workDate,
+                    onValueChange = vm::updateTimeDate,
+                    label = { Text("Datum (JJJJ-MM-TT)") },
+                    leadingIcon = { Icon(Icons.Default.CalendarMonth, null) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = state.fromTime,
+                        onValueChange = vm::updateFromTime,
+                        label = { Text("Von") },
+                        placeholder = { Text("08:00") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = state.toTime,
+                        onValueChange = vm::updateToTime,
+                        label = { Text("Bis") },
+                        placeholder = { Text("16:30") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                OutlinedTextField(
+                    value = state.breakMinutes,
+                    onValueChange = vm::updateBreakMinutes,
+                    label = { Text("Pause in Minuten") },
+                    leadingIcon = { Icon(Icons.Default.Coffee, null) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Text("Tätigkeit", fontWeight = FontWeight.SemiBold)
+                activities.chunked(2).forEach { rowItems ->
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        rowItems.forEach { activity ->
+                            FilterChip(
+                                selected = state.activity == activity,
+                                onClick = { vm.updateActivity(activity) },
+                                label = { Text(activity) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        if (rowItems.size == 1) Spacer(Modifier.weight(1f))
+                    }
+                }
+
+                OutlinedTextField(
+                    value = state.note,
+                    onValueChange = vm::updateTimeNote,
+                    label = { Text("Notiz") },
+                    placeholder = { Text("Was wurde gemacht?") },
+                    minLines = 3,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
+
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+            shape = RoundedCornerShape(22.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Schedule, null, Modifier.size(34.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                Spacer(Modifier.width(14.dp))
+                Column {
+                    Text("Arbeitszeit", style = MaterialTheme.typography.labelLarge)
+                    Text(hours?.let(::formatHours)?.plus(" Stunden") ?: "–", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+        state.error?.let { Text(it, color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.SemiBold) }
+        state.success?.let { Text(it, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold) }
+
+        Button(
+            onClick = vm::saveTimeEntry,
+            enabled = !state.saving && hours != null && hours > 0.0,
+            modifier = Modifier.fillMaxWidth().height(60.dp),
+            shape = RoundedCornerShape(18.dp)
+        ) {
+            if (state.saving) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+            else { Icon(Icons.Default.Save, null); Spacer(Modifier.width(10.dp)); Text("Zeit speichern", fontWeight = FontWeight.Bold) }
+        }
     }
 }
 
@@ -733,21 +858,29 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
         Text("Mehr", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Text(login.displayName, fontWeight = FontWeight.Bold)
         Text(roleLabel(login.role))
-        Text("NextERP Mobile 1.1.0 · API v1")
+        Text("NextERP Mobile 1.2.0 · API v1")
         OutlinedButton(onClick = logout, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Logout, null); Spacer(Modifier.width(8.dp)); Text("Abmelden") }
     }
 }
 
-private fun formatAppointmentTime(startAt: String, endAt: String): String {
-    fun time(value: String): String = value.substringAfter(' ').take(5).ifBlank { value }
-    val start = time(startAt)
-    val end = time(endAt)
-    return when {
-        start.isBlank() -> "Termin"
-        end.isBlank() -> start
-        else -> "$start–$end Uhr"
+private fun calculateHours(from: String, to: String, breakMinutes: String): Double? {
+    fun minutes(value: String): Int? {
+        val parts = value.trim().split(":")
+        if (parts.size != 2) return null
+        val hour = parts[0].toIntOrNull() ?: return null
+        val minute = parts[1].toIntOrNull() ?: return null
+        if (hour !in 0..23 || minute !in 0..59) return null
+        return hour * 60 + minute
     }
+    val start = minutes(from) ?: return null
+    var end = minutes(to) ?: return null
+    if (end < start) end += 24 * 60
+    val pause = breakMinutes.toIntOrNull()?.coerceAtLeast(0) ?: 0
+    val net = end - start - pause
+    return if (net > 0) net / 60.0 else null
 }
+
+private fun formatHours(hours: Double): String = String.format(java.util.Locale.GERMANY, "%.2f", hours)
 
 private fun roleLabel(role: String): String = when (role.lowercase()) {
     "administrator", "admin" -> "Administrator"; "office" -> "Büro"; "manager" -> "Projektleiter"; "employee" -> "Monteur"; else -> role
