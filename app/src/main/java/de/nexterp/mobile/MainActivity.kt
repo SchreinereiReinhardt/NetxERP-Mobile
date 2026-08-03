@@ -47,12 +47,23 @@ data class LoginState(
     val error: String? = null
 )
 
+data class AppointmentDto(
+    val id: Int,
+    val title: String,
+    val startAt: String,
+    val endAt: String,
+    val location: String,
+    val description: String,
+    val projectId: Int?
+)
+
 data class DashboardData(
     val projectsToday: Int = 0,
     val tasks: Int = 0,
     val documents: Int = 0,
     val reportsOpen: Int = 0,
     val todayHours: Double = 0.0,
+    val appointments: List<AppointmentDto> = emptyList(),
     val recentProjects: List<ProjectDto> = emptyList()
 )
 
@@ -352,6 +363,7 @@ object NextErpApi {
             documents = data.optInt("documents", 0),
             reportsOpen = data.optInt("reportsOpen", 0),
             todayHours = data.optDouble("todayHours", 0.0),
+            appointments = data.optJSONArray("appointments").toAppointments(),
             recentProjects = data.optJSONArray("recentProjects").toProjects()
         )
     }
@@ -388,6 +400,26 @@ object NextErpApi {
             index++
         }
         return indexed
+    }
+
+    private fun org.json.JSONArray?.toAppointments(): List<AppointmentDto> {
+        if (this == null) return emptyList()
+        return buildList {
+            for (i in 0 until length()) {
+                val item = optJSONObject(i) ?: continue
+                add(
+                    AppointmentDto(
+                        id = item.optInt("id"),
+                        title = item.optString("title", "Termin"),
+                        startAt = item.optString("start_at"),
+                        endAt = item.optString("end_at"),
+                        location = item.optString("location"),
+                        description = item.optString("description"),
+                        projectId = item.opt("project_id")?.takeUnless { it == JSONObject.NULL }?.toString()?.toIntOrNull()
+                    )
+                )
+            }
+        }
     }
 
     private fun org.json.JSONArray?.toProjects(): List<ProjectDto> {
@@ -538,9 +570,43 @@ private fun TodayScreen(state: DataState, openProject: (ProjectDto) -> Unit, ref
                 val data = state.dashboard
                 Text("Heute", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
                 MetricGrid(data)
+                Text("Meine Termine", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                if (data.appointments.isEmpty()) EmptyState("Heute sind keine Termine eingetragen.")
+                else data.appointments.forEach { appointment -> AppointmentCard(appointment) }
                 Text("Aktuelle Projekte", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 if (data.recentProjects.isEmpty()) EmptyState("Keine aktiven Projekte gefunden.")
                 else data.recentProjects.take(4).forEach { project -> ProjectCard(project) { openProject(project) } }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppointmentCard(appointment: AppointmentDto) {
+    val context = LocalContext.current
+    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp)) {
+        Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
+                    Icon(Icons.Default.Event, null, Modifier.padding(10.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(appointment.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text(formatAppointmentTime(appointment.startAt, appointment.endAt), style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+            if (appointment.location.isNotBlank()) {
+                Text(appointment.location, style = MaterialTheme.typography.bodyMedium)
+                FilledTonalButton(
+                    onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=${Uri.encode(appointment.location)}"))) },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Icon(Icons.Default.Navigation, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Navigation starten")
+                }
             }
         }
     }
@@ -667,8 +733,19 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
         Text("Mehr", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Text(login.displayName, fontWeight = FontWeight.Bold)
         Text(roleLabel(login.role))
-        Text("NextERP Mobile 1.0.0 · API v1")
+        Text("NextERP Mobile 1.1.0 · API v1")
         OutlinedButton(onClick = logout, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Logout, null); Spacer(Modifier.width(8.dp)); Text("Abmelden") }
+    }
+}
+
+private fun formatAppointmentTime(startAt: String, endAt: String): String {
+    fun time(value: String): String = value.substringAfter(' ').take(5).ifBlank { value }
+    val start = time(startAt)
+    val end = time(endAt)
+    return when {
+        start.isBlank() -> "Termin"
+        end.isBlank() -> start
+        else -> "$start–$end Uhr"
     }
 }
 
