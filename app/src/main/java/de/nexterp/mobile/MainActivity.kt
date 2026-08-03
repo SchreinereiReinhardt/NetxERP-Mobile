@@ -632,7 +632,8 @@ object NextErpApi {
                         barcode = json.optString("barcode"),
                         unit = json.optString("unit", "Stk."),
                         stockQuantity = json.optDouble("stock_quantity", json.optDouble("stockQuantity", 0.0)),
-                        minimumStock = json.optDouble("minimum_stock", json.optDouble("minimumStock", 0.0))
+                        minimumStock = json.optDouble("minimum_stock", json.optDouble("minimumStock", 0.0)),
+                        salePrice = json.optDouble("sale_price", json.optDouble("salePrice", 0.0))
                     ))
                 }
             }
