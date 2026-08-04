@@ -3,12 +3,15 @@ package de.nexterp.mobile
 import android.app.Application
 import android.content.Intent
 import android.net.Uri
+import android.provider.OpenableColumns
 import android.os.Bundle
 import android.graphics.Bitmap
 import android.graphics.Paint
 import android.util.Base64
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
@@ -29,6 +32,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.FileProvider
+import coil.compose.AsyncImage
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -37,6 +42,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import de.nexterp.mobile.ui.theme.NextERPTheme
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.time.LocalDate
@@ -126,6 +132,15 @@ data class ReportHourPosition(
     val activity: String = "Montage"
 )
 
+data class ReportPhoto(
+    val localUri: String,
+    val fileName: String,
+    val category: String,
+    val uploadedDocumentId: Int? = null,
+    val uploading: Boolean = false,
+    val error: String? = null
+)
+
 data class ImportableTimeDto(
     val id: Int,
     val workDate: String,
@@ -146,6 +161,7 @@ data class ReportState(
     val customerSignatureData: String = "",
     val technicianSignedBy: String = "",
     val technicianSignatureData: String = "",
+    val photos: List<ReportPhoto> = emptyList(),
     val invoiceReady: Boolean = false,
     val hours: List<ReportHourPosition> = listOf(ReportHourPosition()),
     val materials: List<TimeMaterialPosition> = listOf(TimeMaterialPosition()),
@@ -307,6 +323,30 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun updateTechnicianSignature(value: String) { reportState = reportState.copy(technicianSignatureData = value, success = null, error = null) }
     fun updateReportInvoiceReady(value: Boolean) { reportState = reportState.copy(invoiceReady = value, success = null, error = null) }
 
+    fun addReportPhoto(category: String, uri: String, fileName: String) {
+        reportState = reportState.copy(
+            photos = reportState.photos + ReportPhoto(
+                localUri = uri,
+                fileName = fileName,
+                category = category
+            ),
+            success = null,
+            error = null
+        )
+    }
+
+    fun removeReportPhoto(index: Int) {
+        val rows = reportState.photos.toMutableList()
+        if (index !in rows.indices) return
+        val removed = rows.removeAt(index)
+        runCatching {
+            val uri = Uri.parse(removed.localUri)
+            if (uri.scheme == "file") File(uri.path.orEmpty()).delete()
+            else getApplication<Application>().contentResolver.delete(uri, null, null)
+        }
+        reportState = reportState.copy(photos = rows, success = null, error = null)
+    }
+
     fun addReportHour() { reportState = reportState.copy(hours = reportState.hours + ReportHourPosition(), success = null, error = null) }
     fun removeReportHour(index: Int) {
         val rows = reportState.hours.toMutableList()
@@ -382,6 +422,70 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
         reportState = reportState.copy(saving = true, error = null, success = null)
         viewModelScope.launch {
+            val uploadedPhotoIds = mutableListOf<Int>()
+            val updatedPhotos = reportState.photos.toMutableList()
+
+            for (index in updatedPhotos.indices) {
+                val photo = updatedPhotos[index]
+                if (photo.uploadedDocumentId != null) {
+                    uploadedPhotoIds += photo.uploadedDocumentId
+                    continue
+                }
+
+                updatedPhotos[index] = photo.copy(uploading = true, error = null)
+                reportState = reportState.copy(photos = updatedPhotos.toList())
+
+                val bytes = runCatching {
+                    getApplication<Application>().contentResolver
+                        .openInputStream(Uri.parse(photo.localUri))
+                        ?.use { it.readBytes() }
+                        ?: error("Foto konnte nicht gelesen werden.")
+                }
+
+                if (bytes.isFailure) {
+                    val message = bytes.exceptionOrNull()?.message ?: "Foto konnte nicht gelesen werden."
+                    updatedPhotos[index] = photo.copy(uploading = false, error = message)
+                    reportState = reportState.copy(
+                        photos = updatedPhotos.toList(),
+                        saving = false,
+                        error = message
+                    )
+                    return@launch
+                }
+
+                val uploadResult = authorizedRequest { token ->
+                    NextErpApi.uploadPhoto(
+                        server = loginState.server,
+                        token = token,
+                        projectId = project.id,
+                        category = photo.category,
+                        fileName = photo.fileName,
+                        bytes = bytes.getOrThrow()
+                    )
+                }
+
+                if (uploadResult.isFailure) {
+                    val message = uploadResult.exceptionOrNull()?.message ?: "Foto konnte nicht hochgeladen werden."
+                    updatedPhotos[index] = photo.copy(uploading = false, error = message)
+                    reportState = reportState.copy(
+                        photos = updatedPhotos.toList(),
+                        saving = false,
+                        error = message
+                    )
+                    return@launch
+                }
+
+                val uploaded = uploadResult.getOrThrow()
+                val documentId = uploaded.optInt("id")
+                if (documentId > 0) uploadedPhotoIds += documentId
+                updatedPhotos[index] = photo.copy(
+                    uploadedDocumentId = documentId.takeIf { it > 0 },
+                    uploading = false,
+                    error = null
+                )
+                reportState = reportState.copy(photos = updatedPhotos.toList())
+            }
+
             val result = authorizedRequest { token ->
                 NextErpApi.createReport(
                     loginState.server,
@@ -398,7 +502,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     reportState.customerSignedBy.trim(),
                     reportState.customerSignatureData,
                     reportState.technicianSignedBy.trim(),
-                    reportState.technicianSignatureData
+                    reportState.technicianSignatureData,
+                    uploadedPhotoIds
                 )
             }
             reportState = if(result.isSuccess) {
@@ -779,7 +884,8 @@ object NextErpApi {
         description: String, customerNote: String, invoiceReady: Boolean,
         hours: List<JSONObject>, materials: List<JSONObject>, importEntryIds: List<Int>,
         customerSignedBy: String, customerSignatureData: String,
-        technicianSignedBy: String, technicianSignatureData: String
+        technicianSignedBy: String, technicianSignatureData: String,
+        photoDocumentIds: List<Int>
     ): Result<JSONObject> = runCatching {
         val body=JSONObject()
             .put("projectId",projectId).put("reportDate",reportDate).put("title",title)
@@ -787,7 +893,61 @@ object NextErpApi {
             .put("hours",JSONArray(hours)).put("materials",JSONArray(materials)).put("importEntryIds",JSONArray(importEntryIds))
             .put("customerSignedBy",customerSignedBy).put("customerSignatureData",customerSignatureData)
             .put("technicianSignedBy",technicianSignedBy).put("technicianSignatureData",technicianSignatureData)
+            .put("photoDocumentIds", JSONArray(photoDocumentIds))
         request(server,"/report","POST",token,body) as? JSONObject ?: error("Ungültige Rapport-Antwort.")
+    }
+
+    suspend fun uploadPhoto(
+        server: String,
+        token: String,
+        projectId: Int,
+        category: String,
+        fileName: String,
+        bytes: ByteArray
+    ): Result<JSONObject> = runCatching {
+        withContext(Dispatchers.IO) {
+            val boundary = "----NextERP${System.currentTimeMillis()}"
+            val safeCategory = java.net.URLEncoder.encode(category, "UTF-8")
+            val url = URL(
+                apiBase(server) +
+                    "/upload?projectId=$projectId&type=photo&category=$safeCategory"
+            )
+            val connection = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 30_000
+                readTimeout = 60_000
+                doOutput = true
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("Authorization", "Bearer $token")
+                setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+            }
+
+            try {
+                connection.outputStream.use { output ->
+                    val header = buildString {
+                        append("--$boundary\r\n")
+                        append("Content-Disposition: form-data; name=\"file\"; filename=\"")
+                        append(fileName.replace("\"", "_"))
+                        append("\"\r\n")
+                        append("Content-Type: image/jpeg\r\n\r\n")
+                    }.toByteArray(Charsets.UTF_8)
+                    output.write(header)
+                    output.write(bytes)
+                    output.write("\r\n--$boundary--\r\n".toByteArray(Charsets.UTF_8))
+                }
+
+                val code = connection.responseCode
+                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                val json = if (body.isBlank()) JSONObject() else JSONObject(body)
+                if (code == 401) throw ApiUnauthorizedException(apiMessage(json, "Anmeldung abgelaufen."))
+                if (code !in 200..299) error(apiMessage(json, "Foto-Upload fehlgeschlagen (HTTP $code)."))
+                if (!json.optBoolean("success", false)) error(apiMessage(json, "Foto-Upload fehlgeschlagen."))
+                json.optJSONObject("data") ?: error("Ungültige Upload-Antwort.")
+            } finally {
+                connection.disconnect()
+            }
+        }
     }
 
     suspend fun projectDocuments(
@@ -1444,6 +1604,20 @@ private fun ReportScreen(
             OutlinedTextField(state.title,vm::updateReportTitle,label={Text("Titel")},singleLine=true,modifier=Modifier.fillMaxWidth())
         }}
 
+        Card(shape=RoundedCornerShape(22.dp),modifier=Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(18.dp),verticalArrangement=Arrangement.spacedBy(10.dp)) {
+                Text("Ausgeführte Arbeiten",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)
+                OutlinedTextField(
+                    state.notes,
+                    vm::updateReportNotes,
+                    label={Text("Was wurde gemacht?")},
+                    placeholder={Text("Zum Beispiel: Haustür montiert, Beschläge eingestellt und Funktion geprüft.")},
+                    minLines=5,
+                    modifier=Modifier.fillMaxWidth()
+                )
+            }
+        }
+
         Card(shape=RoundedCornerShape(22.dp),modifier=Modifier.fillMaxWidth()) { Column(Modifier.padding(18.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
             Text("Zeiten im Rapport",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)
             Text("Eigene Zeiten eintragen",fontWeight=FontWeight.SemiBold)
@@ -1477,6 +1651,14 @@ private fun ReportScreen(
             FilledTonalButton(vm::addReportMaterial,Modifier.fillMaxWidth()){Icon(Icons.Default.Add,null);Spacer(Modifier.width(8.dp));Text("Weitere Materialposition")}
             Text("Material aus übernommenen Zeiten wird serverseitig automatisch mit übernommen.",style=MaterialTheme.typography.bodySmall)
         }}
+
+
+        ReportPhotosSection(
+            project = project,
+            photos = state.photos,
+            addPhoto = vm::addReportPhoto,
+            removePhoto = vm::removeReportPhoto
+        )
 
 
         Card(shape=RoundedCornerShape(22.dp),modifier=Modifier.fillMaxWidth()) {
@@ -1519,7 +1701,6 @@ private fun ReportScreen(
         }
 
         Card(shape=RoundedCornerShape(22.dp),modifier=Modifier.fillMaxWidth()) { Column(Modifier.padding(18.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
-            OutlinedTextField(state.notes,vm::updateReportNotes,label={Text("Arbeiten und Notizen")},minLines=4,modifier=Modifier.fillMaxWidth())
             OutlinedTextField(state.customerNote,vm::updateReportCustomerNote,label={Text("Hinweis für den Kunden")},minLines=2,modifier=Modifier.fillMaxWidth())
             Row(verticalAlignment=Alignment.CenterVertically){Switch(state.invoiceReady,vm::updateReportInvoiceReady);Spacer(Modifier.width(10.dp));Column{Text("Für Rechnung vormerken",fontWeight=FontWeight.Bold);Text("Rapport im Büro als abrechnungsbereit markieren",style=MaterialTheme.typography.bodySmall)}}
         }}
@@ -1530,6 +1711,163 @@ private fun ReportScreen(
     pickerIndex?.let { index -> AlertDialog(onDismissRequest={pickerIndex=null},title={Text("Material auswählen")},text={Column(verticalArrangement=Arrangement.spacedBy(8.dp)){OutlinedTextField(materialQuery,{materialQuery=it},label={Text("Suche")},leadingIcon={Icon(Icons.Default.Search,null)},singleLine=true,modifier=Modifier.fillMaxWidth());if(materialsLoading)LoadingState()else Column(Modifier.heightIn(max=420.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)){availableMaterials.filter{m->materialQuery.isBlank()||listOf(m.name,m.articleNo,m.barcode).any{it.contains(materialQuery,true)}}.take(30).forEach{m->Card(onClick={vm.selectReportMaterial(index,m);pickerIndex=null},modifier=Modifier.fillMaxWidth()){Column(Modifier.padding(12.dp)){Text(m.name,fontWeight=FontWeight.Bold);Text(listOf(m.articleNo,m.unit,formatMoney(m.salePrice)).filter{it.isNotBlank()}.joinToString(" · "),style=MaterialTheme.typography.bodySmall)}}}}}},confirmButton={TextButton(onClick={pickerIndex=null}){Text("Schließen")}}) }
 }
 
+
+@Composable
+private fun ReportPhotosSection(
+    project: ProjectDto,
+    photos: List<ReportPhoto>,
+    addPhoto: (String, String, String) -> Unit,
+    removePhoto: (Int) -> Unit
+) {
+    val context = LocalContext.current
+    var pendingCategory by remember { mutableStateOf("Sonstige") }
+    var pendingFile by remember { mutableStateOf<File?>(null) }
+
+    val cameraLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+        val file = pendingFile
+        if (success && file != null && file.exists() && file.length() > 0L) {
+            val uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                file
+            )
+            addPhoto(pendingCategory, uri.toString(), file.name)
+        } else {
+            file?.delete()
+        }
+        pendingFile = null
+    }
+
+    fun takePhoto(category: String) {
+        val photoDir = File(context.cacheDir, "rapport_photos").apply { mkdirs() }
+        val safeProject = project.projectNo.ifBlank { project.id.toString() }
+            .replace(Regex("[^A-Za-z0-9_-]"), "_")
+        val safeCategory = category.lowercase()
+            .replace("ä", "ae")
+            .replace("ö", "oe")
+            .replace("ü", "ue")
+            .replace(Regex("[^a-z0-9_-]"), "_")
+        val file = File(
+            photoDir,
+            "${safeProject}_${safeCategory}_${System.currentTimeMillis()}.jpg"
+        )
+        val uri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            file
+        )
+        pendingCategory = category
+        pendingFile = file
+        cameraLauncher.launch(uri)
+    }
+
+    val categories = listOf(
+        "Vorher" to Icons.Default.History,
+        "Nachher" to Icons.Default.DoneAll,
+        "Montage" to Icons.Default.Handyman,
+        "Schaden" to Icons.Default.Warning,
+        "Abnahme" to Icons.Default.Verified,
+        "Sonstige" to Icons.Default.AddAPhoto
+    )
+
+    Card(shape = RoundedCornerShape(22.dp), modifier = Modifier.fillMaxWidth()) {
+        Column(
+            Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                "Fotodokumentation",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                "Kategorie antippen und Foto aufnehmen. Für weitere Bilder einfach erneut antippen.",
+                style = MaterialTheme.typography.bodySmall
+            )
+
+            categories.chunked(2).forEach { row ->
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    row.forEach { (category, icon) ->
+                        FilledTonalButton(
+                            onClick = { takePhoto(category) },
+                            modifier = Modifier.weight(1f).height(52.dp),
+                            shape = RoundedCornerShape(16.dp)
+                        ) {
+                            Icon(icon, null)
+                            Spacer(Modifier.width(6.dp))
+                            Text(category)
+                        }
+                    }
+                }
+            }
+
+            if (photos.isEmpty()) {
+                Text(
+                    "Noch keine Fotos aufgenommen.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            } else {
+                HorizontalDivider()
+                photos.groupBy { it.category }.forEach { (category, items) ->
+                    Text(
+                        "$category · ${items.size}",
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    items.forEach { photo ->
+                        val originalIndex = photos.indexOf(photo)
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant
+                            ),
+                            shape = RoundedCornerShape(16.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                AsyncImage(
+                                    model = photo.localUri,
+                                    contentDescription = photo.category,
+                                    modifier = Modifier.size(82.dp)
+                                )
+                                Spacer(Modifier.width(12.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(photo.category, fontWeight = FontWeight.Bold)
+                                    Text(
+                                        when {
+                                            photo.uploading -> "Wird hochgeladen …"
+                                            photo.uploadedDocumentId != null -> "Hochgeladen"
+                                            photo.error != null -> photo.error
+                                            else -> "Wird beim Speichern hochgeladen"
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = when {
+                                            photo.error != null -> MaterialTheme.colorScheme.error
+                                            photo.uploadedDocumentId != null -> MaterialTheme.colorScheme.primary
+                                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                        }
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { removePhoto(originalIndex) },
+                                    enabled = !photo.uploading
+                                ) {
+                                    Icon(Icons.Default.Delete, "Foto löschen")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 @Composable
 private fun SignaturePad(
@@ -1915,7 +2253,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
         Text("Mehr", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Text(login.displayName, fontWeight = FontWeight.Bold)
         Text(roleLabel(login.role))
-        Text("NextERP Mobile 1.4.1 · API v1")
+        Text("NextERP Mobile 1.5.0 · API v1")
         OutlinedButton(onClick = logout, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Logout, null); Spacer(Modifier.width(8.dp)); Text("Abmelden") }
     }
 }
