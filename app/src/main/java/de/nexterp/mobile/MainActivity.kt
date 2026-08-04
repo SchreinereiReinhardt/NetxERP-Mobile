@@ -32,9 +32,10 @@ import java.time.LocalDate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 
-enum class Screen { TODAY, PROJECTS, PROJECT, TIME_ENTRY, SCANNER, MATERIAL, DOCUMENTS, MORE }
+enum class Screen { TODAY, PROJECTS, PROJECT, TIME_ENTRY, REPORT, SCANNER, MATERIAL, DOCUMENTS, MORE }
 
 data class LoginState(
     val server: String = "https://cloud.kassel-net.de",
@@ -103,6 +104,42 @@ data class TimeMaterialPosition(
     val quantity: String = "1",
     val unit: String = "Stk.",
     val unitPrice: Double = 0.0
+)
+
+
+data class ReportHourPosition(
+    val workDate: String = LocalDate.now().toString(),
+    val fromTime: String = "08:00",
+    val toTime: String = "16:30",
+    val breakMinutes: String = "30",
+    val activity: String = "Montage"
+)
+
+data class ImportableTimeDto(
+    val id: Int,
+    val workDate: String,
+    val userId: String,
+    val displayName: String,
+    val hours: Double,
+    val activity: String,
+    val materialCount: Int,
+    val materialTotal: Double
+)
+
+data class ReportState(
+    val reportDate: String = LocalDate.now().toString(),
+    val title: String = "Arbeitsrapport",
+    val notes: String = "",
+    val customerNote: String = "",
+    val invoiceReady: Boolean = false,
+    val hours: List<ReportHourPosition> = listOf(ReportHourPosition()),
+    val materials: List<TimeMaterialPosition> = listOf(TimeMaterialPosition()),
+    val availableTimes: List<ImportableTimeDto> = emptyList(),
+    val selectedTimeIds: Set<Int> = emptySet(),
+    val loadingTimes: Boolean = false,
+    val saving: Boolean = false,
+    val success: String? = null,
+    val error: String? = null
 )
 
 data class DataState(
@@ -176,6 +213,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     var timeEntryState by mutableStateOf(TimeEntryState())
         private set
 
+    var reportState by mutableStateOf(ReportState())
+        private set
+
     init {
         viewModelScope.launch { restoreSession() }
     }
@@ -229,6 +269,93 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         timeEntryState = TimeEntryState()
         screen = Screen.TIME_ENTRY
         loadMaterials("")
+    }
+
+    fun openReport() {
+        val project = dataState.selectedProject ?: return
+        reportState = ReportState(title = "Arbeitsrapport ${project.projectNo}")
+        screen = Screen.REPORT
+        loadMaterials("")
+        loadImportableTimes(project.id)
+    }
+
+    fun updateReportDate(value: String) { reportState = reportState.copy(reportDate = value, success = null, error = null) }
+    fun updateReportTitle(value: String) { reportState = reportState.copy(title = value, success = null, error = null) }
+    fun updateReportNotes(value: String) { reportState = reportState.copy(notes = value, success = null, error = null) }
+    fun updateReportCustomerNote(value: String) { reportState = reportState.copy(customerNote = value, success = null, error = null) }
+    fun updateReportInvoiceReady(value: Boolean) { reportState = reportState.copy(invoiceReady = value, success = null, error = null) }
+
+    fun addReportHour() { reportState = reportState.copy(hours = reportState.hours + ReportHourPosition(), success = null, error = null) }
+    fun removeReportHour(index: Int) {
+        val rows = reportState.hours.toMutableList()
+        if (index !in rows.indices) return
+        rows.removeAt(index)
+        if (rows.isEmpty()) rows += ReportHourPosition()
+        reportState = reportState.copy(hours = rows, success = null, error = null)
+    }
+    fun updateReportHour(index: Int, transform: (ReportHourPosition) -> ReportHourPosition) {
+        val rows = reportState.hours.toMutableList()
+        if (index !in rows.indices) return
+        rows[index] = transform(rows[index])
+        reportState = reportState.copy(hours = rows, success = null, error = null)
+    }
+    fun addReportMaterial() { reportState = reportState.copy(materials = reportState.materials + TimeMaterialPosition(), success = null, error = null) }
+    fun removeReportMaterial(index: Int) {
+        val rows = reportState.materials.toMutableList()
+        if (index !in rows.indices) return
+        rows.removeAt(index)
+        if (rows.isEmpty()) rows += TimeMaterialPosition()
+        reportState = reportState.copy(materials = rows, success = null, error = null)
+    }
+    fun selectReportMaterial(index: Int, material: MaterialDto) {
+        val rows = reportState.materials.toMutableList()
+        if (index !in rows.indices) return
+        rows[index] = TimeMaterialPosition(material.id, material.articleNo, material.name, rows[index].quantity.ifBlank { "1" }, material.unit.ifBlank { "Stk." }, material.salePrice)
+        reportState = reportState.copy(materials = rows, success = null, error = null)
+    }
+    fun updateReportMaterialQuantity(index: Int, value: String) {
+        val normalized = value.filter { it.isDigit() || it == ',' || it == '.' }.replace(',', '.')
+        val rows = reportState.materials.toMutableList()
+        if (index !in rows.indices) return
+        rows[index] = rows[index].copy(quantity = normalized)
+        reportState = reportState.copy(materials = rows, success = null, error = null)
+    }
+    fun toggleReportTime(id: Int) {
+        val selected = reportState.selectedTimeIds.toMutableSet()
+        if (!selected.add(id)) selected.remove(id)
+        reportState = reportState.copy(selectedTimeIds = selected, success = null, error = null)
+    }
+    fun loadImportableTimes(projectId: Int) {
+        viewModelScope.launch {
+            reportState = reportState.copy(loadingTimes = true, error = null)
+            val result = authorizedRequest { token -> NextErpApi.projectTimes(loginState.server, token, projectId) }
+            reportState = if (result.isSuccess) reportState.copy(availableTimes = result.getOrNull().orEmpty(), loadingTimes = false)
+            else reportState.copy(availableTimes = emptyList(), loadingTimes = false, error = result.exceptionOrNull()?.message ?: "Zeiten konnten nicht geladen werden.")
+        }
+    }
+    fun saveReport() {
+        val project = dataState.selectedProject ?: run { reportState = reportState.copy(error = "Kein Projekt ausgewählt."); return }
+        if (reportState.title.isBlank()) { reportState = reportState.copy(error = "Bitte einen Titel eingeben."); return }
+        val ownHours = reportState.hours.mapNotNull { row ->
+            val h = calculateHours(row.fromTime, row.toTime, row.breakMinutes)
+            if (h == null || h <= 0) null else JSONObject().put("workDate", row.workDate).put("hours", h).put("activity", row.activity)
+        }
+        val materials = reportState.materials.mapNotNull { row ->
+            val id=row.materialId ?: return@mapNotNull null
+            val qty=row.quantity.toDoubleOrNull() ?: return@mapNotNull null
+            if(qty<=0) return@mapNotNull null
+            JSONObject().put("materialId",id).put("description",row.name).put("quantity",qty).put("unit",row.unit).put("unitPrice",row.unitPrice)
+        }
+        if (ownHours.isEmpty() && reportState.selectedTimeIds.isEmpty()) { reportState = reportState.copy(error = "Mindestens eine eigene oder übernommene Zeit ist erforderlich."); return }
+        reportState = reportState.copy(saving = true, error = null, success = null)
+        viewModelScope.launch {
+            val result = authorizedRequest { token -> NextErpApi.createReport(loginState.server, token, project.id, reportState.reportDate, reportState.title.trim(), reportState.notes.trim(), reportState.customerNote.trim(), reportState.invoiceReady, ownHours, materials, reportState.selectedTimeIds.toList()) }
+            reportState = if(result.isSuccess) {
+                val r=result.getOrThrow()
+                reportState.copy(saving=false, success="Rapport ${r.optString("reportNo")} gespeichert.", error=null)
+            } else reportState.copy(saving=false, error=result.exceptionOrNull()?.message ?: "Rapport konnte nicht gespeichert werden.")
+            if(result.isSuccess) refresh()
+        }
     }
 
     fun updateTimeDate(value: String) { timeEntryState = timeEntryState.copy(workDate = value, success = null, error = null) }
@@ -588,6 +715,26 @@ object NextErpApi {
     }
 
 
+    suspend fun projectTimes(server: String, token: String, projectId: Int): Result<List<ImportableTimeDto>> = runCatching {
+        when(val data=request(server, "/project/$projectId/times", token=token)) {
+            is JSONArray -> data.toImportableTimes()
+            is JSONObject -> data.optJSONArray("times").toImportableTimes()
+            else -> emptyList()
+        }
+    }
+
+    suspend fun createReport(
+        server: String, token: String, projectId: Int, reportDate: String, title: String,
+        description: String, customerNote: String, invoiceReady: Boolean,
+        hours: List<JSONObject>, materials: List<JSONObject>, importEntryIds: List<Int>
+    ): Result<JSONObject> = runCatching {
+        val body=JSONObject()
+            .put("projectId",projectId).put("reportDate",reportDate).put("title",title)
+            .put("description",description).put("customerNote",customerNote).put("invoiceReady",invoiceReady)
+            .put("hours",JSONArray(hours)).put("materials",JSONArray(materials)).put("importEntryIds",JSONArray(importEntryIds))
+        request(server,"/report","POST",token,body) as? JSONObject ?: error("Ungültige Rapport-Antwort.")
+    }
+
     suspend fun projectDocuments(
         server: String,
         token: String,
@@ -702,6 +849,11 @@ object NextErpApi {
                 }
             }
         }
+    }
+
+    private fun JSONArray?.toImportableTimes(): List<ImportableTimeDto> {
+        if(this==null)return emptyList()
+        return buildList { for(i in 0 until length()) optJSONObject(i)?.let { j -> add(ImportableTimeDto(j.optInt("id"),j.optString("workDate"),j.optString("userId"),j.optString("displayName",j.optString("userId")),j.optDouble("hours"),j.optString("activity"),j.optInt("materialCount"),j.optDouble("materialTotal"))) } }
     }
 
     private fun org.json.JSONArray?.toDocuments(): List<DocumentDto> {
@@ -825,9 +977,11 @@ private fun AppShell(vm: AppViewModel) {
                     openTimeEntry = vm::openTimeEntry,
                     openDocuments = {
                         vm.dataState.selectedProject?.let(vm::openProjectDocuments)
-                    }
+                    },
+                    openReport = vm::openReport
                 )
                 Screen.TIME_ENTRY -> TimeEntryScreen(vm.dataState.selectedProject, vm.timeEntryState, vm.dataState.materials, vm.dataState.materialsLoading, vm)
+                Screen.REPORT -> ReportScreen(vm.dataState.selectedProject, vm.reportState, vm.dataState.materials, vm.dataState.materialsLoading, vm)
                 Screen.SCANNER -> PlaceholderScreen("Scanner", "Dokumente und QR-Codes folgen im nächsten Ausbau.", Icons.Default.QrCodeScanner)
                 Screen.MATERIAL -> MaterialScreen(vm.dataState, vm::loadMaterials)
                 Screen.DOCUMENTS -> DocumentsScreen(
@@ -847,7 +1001,7 @@ private fun AppShell(vm: AppViewModel) {
 @Composable
 private fun AppHeader(name: String, role: String, screen: Screen, onRefresh: () -> Unit, onLogout: () -> Unit) {
     val title = when (screen) {
-        Screen.TODAY -> "Heute"; Screen.PROJECTS -> "Projekte"; Screen.PROJECT -> "Projekt"; Screen.TIME_ENTRY -> "Zeiten"; Screen.SCANNER -> "Scanner"; Screen.MATERIAL -> "Material"; Screen.DOCUMENTS -> "Dokumente"; Screen.MORE -> "Mehr"
+        Screen.TODAY -> "Heute"; Screen.PROJECTS -> "Projekte"; Screen.PROJECT -> "Projekt"; Screen.TIME_ENTRY -> "Zeiten"; Screen.REPORT -> "Rapport"; Screen.SCANNER -> "Scanner"; Screen.MATERIAL -> "Material"; Screen.DOCUMENTS -> "Dokumente"; Screen.MORE -> "Mehr"
     }
     Surface(tonalElevation = 2.dp) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -936,7 +1090,8 @@ private fun ProjectsScreen(state: DataState, openProject: (ProjectDto) -> Unit, 
 private fun ProjectScreen(
     project: ProjectDto?,
     openTimeEntry: () -> Unit,
-    openDocuments: () -> Unit
+    openDocuments: () -> Unit,
+    openReport: () -> Unit
 ) {
     if (project == null) { ScreenColumn { EmptyState("Kein Projekt ausgewählt.") }; return }
     val context = LocalContext.current
@@ -954,7 +1109,7 @@ private fun ProjectScreen(
         PrimaryAction("Material", Icons.Default.Inventory2) {}
         PrimaryAction("Dokumente", Icons.Default.Description, openDocuments)
         PrimaryAction("Fotos", Icons.Default.PhotoCamera) {}
-        PrimaryAction("Rapport", Icons.Default.EditNote) {}
+        PrimaryAction("Rapport erstellen", Icons.Default.EditNote, openReport)
     }
 }
 
@@ -1213,6 +1368,71 @@ private fun ProjectCard(project: ProjectDto, onClick: () -> Unit) {
             Text("Tippen für Navigation, Arbeitszeit und Material", style = MaterialTheme.typography.labelSmall)
         }
     }
+}
+
+@Composable
+private fun ReportScreen(
+    project: ProjectDto?, state: ReportState, availableMaterials: List<MaterialDto>,
+    materialsLoading: Boolean, vm: AppViewModel
+) {
+    if(project==null){ ScreenColumn { EmptyState("Kein Projekt ausgewählt.") }; return }
+    var pickerIndex by remember { mutableStateOf<Int?>(null) }
+    var materialQuery by remember { mutableStateOf("") }
+    val activities=listOf("Montage","Service","Reparatur","Aufmaß","Werkstatt","Anfahrt","Sonstiges")
+    ScreenColumn {
+        Text("Rapport erstellen",style=MaterialTheme.typography.headlineMedium,fontWeight=FontWeight.Bold)
+        Text(project.projectName,fontWeight=FontWeight.Bold)
+        Text(project.projectNo,style=MaterialTheme.typography.bodySmall)
+
+        Card(shape=RoundedCornerShape(22.dp),modifier=Modifier.fillMaxWidth()) { Column(Modifier.padding(18.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+            OutlinedTextField(state.reportDate,vm::updateReportDate,label={Text("Datum")},leadingIcon={Icon(Icons.Default.CalendarMonth,null)},singleLine=true,modifier=Modifier.fillMaxWidth())
+            OutlinedTextField(state.title,vm::updateReportTitle,label={Text("Titel")},singleLine=true,modifier=Modifier.fillMaxWidth())
+        }}
+
+        Card(shape=RoundedCornerShape(22.dp),modifier=Modifier.fillMaxWidth()) { Column(Modifier.padding(18.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+            Text("Zeiten im Rapport",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)
+            Text("Eigene Zeiten eintragen",fontWeight=FontWeight.SemiBold)
+            state.hours.forEachIndexed { index,row ->
+                Card(colors=CardDefaults.cardColors(containerColor=MaterialTheme.colorScheme.surfaceVariant),shape=RoundedCornerShape(18.dp)) { Column(Modifier.padding(14.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                    Row(verticalAlignment=Alignment.CenterVertically){Text("Zeit ${index+1}",fontWeight=FontWeight.Bold,modifier=Modifier.weight(1f));if(state.hours.size>1)IconButton(onClick={vm.removeReportHour(index)}){Icon(Icons.Default.Delete,"Entfernen")}}
+                    OutlinedTextField(row.workDate,{v->vm.updateReportHour(index){it.copy(workDate=v)}},label={Text("Datum")},singleLine=true,modifier=Modifier.fillMaxWidth())
+                    Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){OutlinedTextField(row.fromTime,{v->vm.updateReportHour(index){it.copy(fromTime=v)}},label={Text("Von")},singleLine=true,modifier=Modifier.weight(1f));OutlinedTextField(row.toTime,{v->vm.updateReportHour(index){it.copy(toTime=v)}},label={Text("Bis")},singleLine=true,modifier=Modifier.weight(1f))}
+                    OutlinedTextField(row.breakMinutes,{v->vm.updateReportHour(index){it.copy(breakMinutes=v.filter(Char::isDigit))}},label={Text("Pause Minuten")},singleLine=true,modifier=Modifier.fillMaxWidth())
+                    activities.chunked(2).forEach { group -> Row(horizontalArrangement=Arrangement.spacedBy(8.dp),modifier=Modifier.fillMaxWidth()){group.forEach { a->FilterChip(selected=row.activity==a,onClick={vm.updateReportHour(index){it.copy(activity=a)}},label={Text(a)},modifier=Modifier.weight(1f))};if(group.size==1)Spacer(Modifier.weight(1f))}}
+                    val h=calculateHours(row.fromTime,row.toTime,row.breakMinutes)
+                    Text("${h?.let(::formatHours) ?: "–"} Stunden",fontWeight=FontWeight.Bold)
+                }}
+            }
+            FilledTonalButton(vm::addReportHour,Modifier.fillMaxWidth()){Icon(Icons.Default.Add,null);Spacer(Modifier.width(8.dp));Text("Weitere eigene Zeit")}
+            HorizontalDivider()
+            Text("Erfasste Zeiten übernehmen",fontWeight=FontWeight.SemiBold)
+            if(state.loadingTimes) LoadingState() else if(state.availableTimes.isEmpty()) Text("Keine noch nicht übernommenen Zeiten vorhanden.",style=MaterialTheme.typography.bodySmall) else state.availableTimes.forEach { t ->
+                Card(onClick={vm.toggleReportTime(t.id)},shape=RoundedCornerShape(16.dp),modifier=Modifier.fillMaxWidth()) { Row(Modifier.padding(12.dp),verticalAlignment=Alignment.CenterVertically){Checkbox(checked=t.id in state.selectedTimeIds,onCheckedChange={vm.toggleReportTime(t.id)});Column(Modifier.weight(1f)){Text("${t.workDate} · ${t.displayName}",fontWeight=FontWeight.Bold);Text(t.activity)};Text("${formatHours(t.hours)} h",fontWeight=FontWeight.Bold)} }
+            }
+            if(state.selectedTimeIds.isNotEmpty()) Text("${state.selectedTimeIds.size} Zeiten werden übernommen.",color=MaterialTheme.colorScheme.primary,fontWeight=FontWeight.Bold)
+        }}
+
+        Card(shape=RoundedCornerShape(22.dp),modifier=Modifier.fillMaxWidth()) { Column(Modifier.padding(18.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+            Text("Material im Rapport",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)
+            state.materials.forEachIndexed { index,p -> Card(colors=CardDefaults.cardColors(containerColor=MaterialTheme.colorScheme.surfaceVariant),shape=RoundedCornerShape(18.dp)){Column(Modifier.padding(14.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){
+                Row(verticalAlignment=Alignment.CenterVertically){Text("Position ${index+1}",fontWeight=FontWeight.Bold,modifier=Modifier.weight(1f));if(state.materials.size>1||p.materialId!=null)IconButton(onClick={vm.removeReportMaterial(index)}){Icon(Icons.Default.Delete,"Entfernen")}}
+                OutlinedButton(onClick={pickerIndex=index;materialQuery=""},modifier=Modifier.fillMaxWidth()){Icon(Icons.Default.Search,null);Spacer(Modifier.width(8.dp));Text(if(p.materialId==null)"Material auswählen" else listOf(p.articleNo,p.name).filter{it.isNotBlank()}.joinToString(" · "),modifier=Modifier.weight(1f))}
+                if(p.materialId!=null){Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(10.dp)){OutlinedTextField(p.quantity,{vm.updateReportMaterialQuantity(index,it)},label={Text("Menge")},singleLine=true,modifier=Modifier.weight(1f));Text(p.unit,fontWeight=FontWeight.Bold)};val qty=p.quantity.toDoubleOrNull()?:0.0;if(p.unitPrice>0)Text("Abrechnungswert: ${formatMoney(qty*p.unitPrice)}",fontWeight=FontWeight.SemiBold)}
+            }}}
+            FilledTonalButton(vm::addReportMaterial,Modifier.fillMaxWidth()){Icon(Icons.Default.Add,null);Spacer(Modifier.width(8.dp));Text("Weitere Materialposition")}
+            Text("Material aus übernommenen Zeiten wird serverseitig automatisch mit übernommen.",style=MaterialTheme.typography.bodySmall)
+        }}
+
+        Card(shape=RoundedCornerShape(22.dp),modifier=Modifier.fillMaxWidth()) { Column(Modifier.padding(18.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+            OutlinedTextField(state.notes,vm::updateReportNotes,label={Text("Arbeiten und Notizen")},minLines=4,modifier=Modifier.fillMaxWidth())
+            OutlinedTextField(state.customerNote,vm::updateReportCustomerNote,label={Text("Hinweis für den Kunden")},minLines=2,modifier=Modifier.fillMaxWidth())
+            Row(verticalAlignment=Alignment.CenterVertically){Switch(state.invoiceReady,vm::updateReportInvoiceReady);Spacer(Modifier.width(10.dp));Column{Text("Für Rechnung vormerken",fontWeight=FontWeight.Bold);Text("Rapport im Büro als abrechnungsbereit markieren",style=MaterialTheme.typography.bodySmall)}}
+        }}
+        state.error?.let{Text(it,color=MaterialTheme.colorScheme.error,fontWeight=FontWeight.Bold)}
+        state.success?.let{Text(it,color=MaterialTheme.colorScheme.primary,fontWeight=FontWeight.Bold)}
+        Button(vm::saveReport,enabled=!state.saving,modifier=Modifier.fillMaxWidth().height(60.dp),shape=RoundedCornerShape(18.dp)){if(state.saving)CircularProgressIndicator(Modifier.size(24.dp),strokeWidth=2.dp)else{Icon(Icons.Default.Save,null);Spacer(Modifier.width(8.dp));Text("Rapport speichern",fontWeight=FontWeight.Bold)}}
+    }
+    pickerIndex?.let { index -> AlertDialog(onDismissRequest={pickerIndex=null},title={Text("Material auswählen")},text={Column(verticalArrangement=Arrangement.spacedBy(8.dp)){OutlinedTextField(materialQuery,{materialQuery=it},label={Text("Suche")},leadingIcon={Icon(Icons.Default.Search,null)},singleLine=true,modifier=Modifier.fillMaxWidth());if(materialsLoading)LoadingState()else Column(Modifier.heightIn(max=420.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)){availableMaterials.filter{m->materialQuery.isBlank()||listOf(m.name,m.articleNo,m.barcode).any{it.contains(materialQuery,true)}}.take(30).forEach{m->Card(onClick={vm.selectReportMaterial(index,m);pickerIndex=null},modifier=Modifier.fillMaxWidth()){Column(Modifier.padding(12.dp)){Text(m.name,fontWeight=FontWeight.Bold);Text(listOf(m.articleNo,m.unit,formatMoney(m.salePrice)).filter{it.isNotBlank()}.joinToString(" · "),style=MaterialTheme.typography.bodySmall)}}}}}},confirmButton={TextButton(onClick={pickerIndex=null}){Text("Schließen")}}) }
 }
 
 @Composable
@@ -1483,7 +1703,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
         Text("Mehr", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Text(login.displayName, fontWeight = FontWeight.Bold)
         Text(roleLabel(login.role))
-        Text("NextERP Mobile 1.3.0 · API v1")
+        Text("NextERP Mobile 1.4.0 · API v1")
         OutlinedButton(onClick = logout, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Logout, null); Spacer(Modifier.width(8.dp)); Text("Abmelden") }
     }
 }
