@@ -13,6 +13,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -28,9 +29,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.FileProvider
 import coil.compose.AsyncImage
@@ -1722,6 +1725,7 @@ private fun ReportPhotosSection(
     val context = LocalContext.current
     var pendingCategory by remember { mutableStateOf("Sonstige") }
     var pendingFile by remember { mutableStateOf<File?>(null) }
+    var previewPhoto by remember { mutableStateOf<ReportPhoto?>(null) }
 
     val cameraLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicture()
@@ -1834,7 +1838,10 @@ private fun ReportPhotosSection(
                                 AsyncImage(
                                     model = photo.localUri,
                                     contentDescription = photo.category,
-                                    modifier = Modifier.size(82.dp)
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier
+                                        .size(82.dp)
+                                        .clickable { previewPhoto = photo }
                                 )
                                 Spacer(Modifier.width(12.dp))
                                 Column(Modifier.weight(1f)) {
@@ -1861,6 +1868,38 @@ private fun ReportPhotosSection(
                                     Icon(Icons.Default.Delete, "Foto löschen")
                                 }
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    previewPhoto?.let { photo ->
+        Dialog(onDismissRequest = { previewPhoto = null }) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(22.dp)
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    AsyncImage(
+                        model = photo.localUri,
+                        contentDescription = photo.category,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 280.dp, max = 620.dp)
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(photo.category, fontWeight = FontWeight.Bold)
+                            Text(photo.fileName, style = MaterialTheme.typography.bodySmall)
+                        }
+                        TextButton(onClick = { previewPhoto = null }) {
+                            Text("Schließen")
                         }
                     }
                 }
@@ -2253,7 +2292,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
         Text("Mehr", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Text(login.displayName, fontWeight = FontWeight.Bold)
         Text(roleLabel(login.role))
-        Text("NextERP Mobile 1.5.0 · API v1")
+        Text("NextERP Mobile 1.5.1 · API v1")
         OutlinedButton(onClick = logout, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Logout, null); Spacer(Modifier.width(8.dp)); Text("Abmelden") }
     }
 }
