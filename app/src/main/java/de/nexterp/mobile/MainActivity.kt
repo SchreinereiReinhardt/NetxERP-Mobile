@@ -4,8 +4,13 @@ import android.app.Application
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.graphics.Bitmap
+import android.graphics.Paint
+import android.util.Base64
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -16,8 +21,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -26,6 +36,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import de.nexterp.mobile.ui.theme.NextERPTheme
+import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.time.LocalDate
@@ -131,6 +142,10 @@ data class ReportState(
     val title: String = "Arbeitsrapport",
     val notes: String = "",
     val customerNote: String = "",
+    val customerSignedBy: String = "",
+    val customerSignatureData: String = "",
+    val technicianSignedBy: String = "",
+    val technicianSignatureData: String = "",
     val invoiceReady: Boolean = false,
     val hours: List<ReportHourPosition> = listOf(ReportHourPosition()),
     val materials: List<TimeMaterialPosition> = listOf(TimeMaterialPosition()),
@@ -273,7 +288,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openReport() {
         val project = dataState.selectedProject ?: return
-        reportState = ReportState(title = "Arbeitsrapport ${project.projectNo}")
+        reportState = ReportState(
+            title = "Arbeitsrapport ${project.projectNo}",
+            technicianSignedBy = loginState.displayName.ifBlank { loginState.username }
+        )
         screen = Screen.REPORT
         loadMaterials("")
         loadImportableTimes(project.id)
@@ -283,6 +301,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun updateReportTitle(value: String) { reportState = reportState.copy(title = value, success = null, error = null) }
     fun updateReportNotes(value: String) { reportState = reportState.copy(notes = value, success = null, error = null) }
     fun updateReportCustomerNote(value: String) { reportState = reportState.copy(customerNote = value, success = null, error = null) }
+    fun updateCustomerSignedBy(value: String) { reportState = reportState.copy(customerSignedBy = value, success = null, error = null) }
+    fun updateCustomerSignature(value: String) { reportState = reportState.copy(customerSignatureData = value, success = null, error = null) }
+    fun updateTechnicianSignedBy(value: String) { reportState = reportState.copy(technicianSignedBy = value, success = null, error = null) }
+    fun updateTechnicianSignature(value: String) { reportState = reportState.copy(technicianSignatureData = value, success = null, error = null) }
     fun updateReportInvoiceReady(value: Boolean) { reportState = reportState.copy(invoiceReady = value, success = null, error = null) }
 
     fun addReportHour() { reportState = reportState.copy(hours = reportState.hours + ReportHourPosition(), success = null, error = null) }
@@ -346,10 +368,39 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             if(qty<=0) return@mapNotNull null
             JSONObject().put("materialId",id).put("description",row.name).put("quantity",qty).put("unit",row.unit).put("unitPrice",row.unitPrice)
         }
-        if (ownHours.isEmpty() && reportState.selectedTimeIds.isEmpty()) { reportState = reportState.copy(error = "Mindestens eine eigene oder übernommene Zeit ist erforderlich."); return }
+        if (ownHours.isEmpty() && reportState.selectedTimeIds.isEmpty()) {
+            reportState = reportState.copy(error = "Mindestens eine eigene oder übernommene Zeit ist erforderlich.")
+            return
+        }
+        if (reportState.customerSignatureData.isNotBlank() && reportState.customerSignedBy.isBlank()) {
+            reportState = reportState.copy(error = "Bitte den Namen des unterschreibenden Kunden eintragen.")
+            return
+        }
+        if (reportState.technicianSignatureData.isNotBlank() && reportState.technicianSignedBy.isBlank()) {
+            reportState = reportState.copy(error = "Bitte den Namen des Monteurs eintragen.")
+            return
+        }
         reportState = reportState.copy(saving = true, error = null, success = null)
         viewModelScope.launch {
-            val result = authorizedRequest { token -> NextErpApi.createReport(loginState.server, token, project.id, reportState.reportDate, reportState.title.trim(), reportState.notes.trim(), reportState.customerNote.trim(), reportState.invoiceReady, ownHours, materials, reportState.selectedTimeIds.toList()) }
+            val result = authorizedRequest { token ->
+                NextErpApi.createReport(
+                    loginState.server,
+                    token,
+                    project.id,
+                    reportState.reportDate,
+                    reportState.title.trim(),
+                    reportState.notes.trim(),
+                    reportState.customerNote.trim(),
+                    reportState.invoiceReady,
+                    ownHours,
+                    materials,
+                    reportState.selectedTimeIds.toList(),
+                    reportState.customerSignedBy.trim(),
+                    reportState.customerSignatureData,
+                    reportState.technicianSignedBy.trim(),
+                    reportState.technicianSignatureData
+                )
+            }
             reportState = if(result.isSuccess) {
                 val r=result.getOrThrow()
                 reportState.copy(saving=false, success="Rapport ${r.optString("reportNo")} gespeichert.", error=null)
@@ -726,12 +777,16 @@ object NextErpApi {
     suspend fun createReport(
         server: String, token: String, projectId: Int, reportDate: String, title: String,
         description: String, customerNote: String, invoiceReady: Boolean,
-        hours: List<JSONObject>, materials: List<JSONObject>, importEntryIds: List<Int>
+        hours: List<JSONObject>, materials: List<JSONObject>, importEntryIds: List<Int>,
+        customerSignedBy: String, customerSignatureData: String,
+        technicianSignedBy: String, technicianSignatureData: String
     ): Result<JSONObject> = runCatching {
         val body=JSONObject()
             .put("projectId",projectId).put("reportDate",reportDate).put("title",title)
             .put("description",description).put("customerNote",customerNote).put("invoiceReady",invoiceReady)
             .put("hours",JSONArray(hours)).put("materials",JSONArray(materials)).put("importEntryIds",JSONArray(importEntryIds))
+            .put("customerSignedBy",customerSignedBy).put("customerSignatureData",customerSignatureData)
+            .put("technicianSignedBy",technicianSignedBy).put("technicianSignatureData",technicianSignatureData)
         request(server,"/report","POST",token,body) as? JSONObject ?: error("Ungültige Rapport-Antwort.")
     }
 
@@ -1423,6 +1478,46 @@ private fun ReportScreen(
             Text("Material aus übernommenen Zeiten wird serverseitig automatisch mit übernommen.",style=MaterialTheme.typography.bodySmall)
         }}
 
+
+        Card(shape=RoundedCornerShape(22.dp),modifier=Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(18.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+                Text("Unterschriften",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)
+                Text("Kunde / Auftraggeber",fontWeight=FontWeight.SemiBold)
+                OutlinedTextField(
+                    state.customerSignedBy,
+                    vm::updateCustomerSignedBy,
+                    label={Text("Name des Kunden")},
+                    leadingIcon={Icon(Icons.Default.Person,null)},
+                    singleLine=true,
+                    modifier=Modifier.fillMaxWidth()
+                )
+                SignaturePad(
+                    label="Kunde unterschreibt hier",
+                    signatureData=state.customerSignatureData,
+                    onSignatureChanged=vm::updateCustomerSignature
+                )
+                HorizontalDivider()
+                Text("Monteur",fontWeight=FontWeight.SemiBold)
+                OutlinedTextField(
+                    state.technicianSignedBy,
+                    vm::updateTechnicianSignedBy,
+                    label={Text("Name des Monteurs")},
+                    leadingIcon={Icon(Icons.Default.Engineering,null)},
+                    singleLine=true,
+                    modifier=Modifier.fillMaxWidth()
+                )
+                SignaturePad(
+                    label="Monteur unterschreibt hier",
+                    signatureData=state.technicianSignatureData,
+                    onSignatureChanged=vm::updateTechnicianSignature
+                )
+                Text(
+                    "Ohne Unterschrift kann der Rapport als Entwurf gespeichert werden. Mit Kundenunterschrift wird er serverseitig abgeschlossen.",
+                    style=MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+
         Card(shape=RoundedCornerShape(22.dp),modifier=Modifier.fillMaxWidth()) { Column(Modifier.padding(18.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
             OutlinedTextField(state.notes,vm::updateReportNotes,label={Text("Arbeiten und Notizen")},minLines=4,modifier=Modifier.fillMaxWidth())
             OutlinedTextField(state.customerNote,vm::updateReportCustomerNote,label={Text("Hinweis für den Kunden")},minLines=2,modifier=Modifier.fillMaxWidth())
@@ -1433,6 +1528,123 @@ private fun ReportScreen(
         Button(vm::saveReport,enabled=!state.saving,modifier=Modifier.fillMaxWidth().height(60.dp),shape=RoundedCornerShape(18.dp)){if(state.saving)CircularProgressIndicator(Modifier.size(24.dp),strokeWidth=2.dp)else{Icon(Icons.Default.Save,null);Spacer(Modifier.width(8.dp));Text("Rapport speichern",fontWeight=FontWeight.Bold)}}
     }
     pickerIndex?.let { index -> AlertDialog(onDismissRequest={pickerIndex=null},title={Text("Material auswählen")},text={Column(verticalArrangement=Arrangement.spacedBy(8.dp)){OutlinedTextField(materialQuery,{materialQuery=it},label={Text("Suche")},leadingIcon={Icon(Icons.Default.Search,null)},singleLine=true,modifier=Modifier.fillMaxWidth());if(materialsLoading)LoadingState()else Column(Modifier.heightIn(max=420.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)){availableMaterials.filter{m->materialQuery.isBlank()||listOf(m.name,m.articleNo,m.barcode).any{it.contains(materialQuery,true)}}.take(30).forEach{m->Card(onClick={vm.selectReportMaterial(index,m);pickerIndex=null},modifier=Modifier.fillMaxWidth()){Column(Modifier.padding(12.dp)){Text(m.name,fontWeight=FontWeight.Bold);Text(listOf(m.articleNo,m.unit,formatMoney(m.salePrice)).filter{it.isNotBlank()}.joinToString(" · "),style=MaterialTheme.typography.bodySmall)}}}}}},confirmButton={TextButton(onClick={pickerIndex=null}){Text("Schließen")}}) }
+}
+
+
+@Composable
+private fun SignaturePad(
+    label: String,
+    signatureData: String,
+    onSignatureChanged: (String) -> Unit
+) {
+    var canvasSize by remember { mutableStateOf(IntSize(1, 1)) }
+    val strokes = remember { mutableStateListOf<MutableList<Offset>>() }
+
+    fun exportSignature() {
+        if (strokes.none { it.isNotEmpty() } || canvasSize.width <= 1 || canvasSize.height <= 1) {
+            onSignatureChanged("")
+            return
+        }
+        val bitmap = Bitmap.createBitmap(canvasSize.width, canvasSize.height, Bitmap.Config.ARGB_8888)
+        val androidCanvas = android.graphics.Canvas(bitmap)
+        androidCanvas.drawColor(android.graphics.Color.WHITE)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.BLACK
+            strokeWidth = 6f
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+            style = Paint.Style.STROKE
+        }
+        strokes.forEach { stroke ->
+            if (stroke.size == 1) {
+                val point = stroke.first()
+                androidCanvas.drawPoint(point.x, point.y, paint)
+            } else {
+                for (i in 1 until stroke.size) {
+                    val from = stroke[i - 1]
+                    val to = stroke[i]
+                    androidCanvas.drawLine(from.x, from.y, to.x, to.y, paint)
+                }
+            }
+        }
+        val bytes = ByteArrayOutputStream().use { stream ->
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
+            stream.toByteArray()
+        }
+        bitmap.recycle()
+        onSignatureChanged("data:image/png;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP))
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White)
+    ) {
+        Column {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(180.dp)
+                    .onSizeChanged { canvasSize = it }
+                    .pointerInput(Unit) {
+                        detectDragGestures(
+                            onDragStart = { point -> strokes.add(mutableListOf(point)) },
+                            onDrag = { change, _ ->
+                                change.consume()
+                                if (strokes.isNotEmpty()) strokes.last().add(change.position)
+                            },
+                            onDragEnd = { exportSignature() },
+                            onDragCancel = { exportSignature() }
+                        )
+                    }
+            ) {
+                Canvas(Modifier.fillMaxSize()) {
+                    strokes.forEach { stroke ->
+                        if (stroke.size == 1) {
+                            drawCircle(Color.Black, radius = 3f, center = stroke.first())
+                        } else {
+                            for (i in 1 until stroke.size) {
+                                drawLine(
+                                    color = Color.Black,
+                                    start = stroke[i - 1],
+                                    end = stroke[i],
+                                    strokeWidth = 6f,
+                                    cap = StrokeCap.Round
+                                )
+                            }
+                        }
+                    }
+                }
+                if (strokes.isEmpty() && signatureData.isBlank()) {
+                    Text(
+                        label,
+                        modifier = Modifier.align(Alignment.Center),
+                        color = Color.Gray
+                    )
+                }
+            }
+            HorizontalDivider()
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    if (signatureData.isBlank()) "Noch nicht unterschrieben" else "Unterschrift erfasst",
+                    modifier = Modifier.weight(1f),
+                    color = if (signatureData.isBlank()) Color.Gray else Color(0xFF2E7D32),
+                    style = MaterialTheme.typography.bodySmall
+                )
+                TextButton(onClick = {
+                    strokes.clear()
+                    onSignatureChanged("")
+                }) {
+                    Icon(Icons.Default.DeleteSweep, null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Löschen")
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -1703,7 +1915,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
         Text("Mehr", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Text(login.displayName, fontWeight = FontWeight.Bold)
         Text(roleLabel(login.role))
-        Text("NextERP Mobile 1.4.0 · API v1")
+        Text("NextERP Mobile 1.4.1 · API v1")
         OutlinedButton(onClick = logout, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Logout, null); Spacer(Modifier.width(8.dp)); Text("Abmelden") }
     }
 }
