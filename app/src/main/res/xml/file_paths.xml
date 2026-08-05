@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <cache-path name="rapport_photos" path="rapport_photos/" />
+    <cache-path name="project_photos" path="project_photos/" />
 </paths>
