@@ -12,8 +12,8 @@ android {
         applicationId = "de.nexterp.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 20
-        versionName = "1.9.0"
+        versionCode = 21
+        versionName = "2.0.0"
     }
 
     buildFeatures { compose = true }
@@ -39,5 +39,6 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

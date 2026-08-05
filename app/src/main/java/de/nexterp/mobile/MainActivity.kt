@@ -39,6 +39,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.FileProvider
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.google.android.gms.codescanner.GmsBarcodeScannerOptions
+import com.google.android.gms.codescanner.GmsBarcodeScanning
+import com.google.mlkit.vision.barcode.common.Barcode
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -228,6 +231,7 @@ data class DataState(
     val customersError: String? = null,
     val materials: List<MaterialDto> = emptyList(),
     val materialsLoading: Boolean = false,
+    val materialSearchQuery: String = "",
     val documents: List<DocumentDto> = emptyList(),
     val documentsLoading: Boolean = false,
     val documentsProjectId: Int? = null,
@@ -964,9 +968,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             projects = projectsResult.getOrNull().orEmpty(),
             materials = dataState.materials,
             materialsLoading = dataState.materialsLoading,
+            materialSearchQuery = dataState.materialSearchQuery,
             selectedProject = dataState.selectedProject,
             error = null
         )
+    }
+
+    fun openMaterialFromScanner(query: String) {
+        val cleanQuery = query.trim()
+        dataState = dataState.copy(materialSearchQuery = cleanQuery)
+        screen = Screen.MATERIAL
+        loadMaterials(cleanQuery)
     }
 
     fun loadMaterials(query: String = "") {
@@ -1561,8 +1573,16 @@ private fun AppShell(vm: AppViewModel) {
                     uploadPhoto = vm::uploadProjectPhoto,
                     refresh = { vm.dataState.selectedProject?.let { vm.loadProjectPhotos(it.id) } }
                 )
-                Screen.SCANNER -> PlaceholderScreen("Scanner", "Dokumente und QR-Codes folgen im nächsten Ausbau.", Icons.Default.QrCodeScanner)
-                Screen.MATERIAL -> MaterialScreen(vm.dataState, vm::loadMaterials)
+                Screen.SCANNER -> ScannerScreen(
+                    state = vm.dataState,
+                    openProject = vm::openProject,
+                    searchMaterial = vm::openMaterialFromScanner
+                )
+                Screen.MATERIAL -> MaterialScreen(
+                    state = vm.dataState,
+                    initialQuery = vm.dataState.materialSearchQuery,
+                    loadMaterials = vm::loadMaterials
+                )
                 Screen.DOCUMENTS -> DocumentsScreen(
                     state = vm.dataState,
                     server = vm.loginState.server,
@@ -2628,9 +2648,154 @@ private fun SignaturePad(
 }
 
 @Composable
-private fun MaterialScreen(state: DataState, loadMaterials: (String) -> Unit) {
-    var query by remember { mutableStateOf("") }
-    LaunchedEffect(Unit) { loadMaterials("") }
+private fun ScannerScreen(
+    state: DataState,
+    openProject: (ProjectDto) -> Unit,
+    searchMaterial: (String) -> Unit
+) {
+    val context = LocalContext.current
+    var scannedValue by remember { mutableStateOf("") }
+    var scanError by remember { mutableStateOf<String?>(null) }
+    var scanning by remember { mutableStateOf(false) }
+
+    val options = remember {
+        GmsBarcodeScannerOptions.Builder()
+            .setBarcodeFormats(Barcode.FORMAT_ALL_FORMATS)
+            .enableAutoZoom()
+            .build()
+    }
+    val scanner = remember { GmsBarcodeScanning.getClient(context, options) }
+    val detectedProject = remember(scannedValue, state.projects) {
+        findProjectFromScan(scannedValue, state.projects)
+    }
+
+    fun startScanner() {
+        scanning = true
+        scanError = null
+        scanner.startScan()
+            .addOnSuccessListener { barcode ->
+                scanning = false
+                scannedValue = barcode.rawValue.orEmpty().trim()
+                findProjectFromScan(scannedValue, state.projects)?.let(openProject)
+            }
+            .addOnCanceledListener { scanning = false }
+            .addOnFailureListener { error ->
+                scanning = false
+                scanError = error.message ?: "Scanner konnte nicht gestartet werden."
+            }
+    }
+
+    ScreenColumn {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(28.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primary)
+        ) {
+            Column(Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Icon(Icons.Default.QrCodeScanner, null, Modifier.size(48.dp), tint = MaterialTheme.colorScheme.onPrimary)
+                Text("Universal-Scanner", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.onPrimary)
+                Text("QR-Code, EAN, Code 128 und DataMatrix scannen.", color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.85f))
+            }
+        }
+
+        Button(
+            onClick = { startScanner() },
+            enabled = !scanning,
+            modifier = Modifier.fillMaxWidth().height(62.dp),
+            shape = RoundedCornerShape(20.dp)
+        ) {
+            if (scanning) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+            else {
+                Icon(Icons.Default.CenterFocusStrong, null)
+                Spacer(Modifier.width(10.dp))
+                Text("Code scannen", fontWeight = FontWeight.Bold)
+            }
+        }
+
+        scanError?.let { ErrorState(it) { startScanner() } }
+
+        if (scannedValue.isBlank()) {
+            Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp)) {
+                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    ScannerUseRow(Icons.Default.FolderOpen, "Projektcode", "Öffnet das Projekt direkt")
+                    ScannerUseRow(Icons.Default.Inventory2, "Materialbarcode", "Sucht Artikel und Bestand")
+                    ScannerUseRow(Icons.Default.Link, "Web- oder Dokumentlink", "Öffnet den enthaltenen Link")
+                }
+            }
+        } else {
+            Text("Erkannt", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp)) {
+                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(scannedValue, fontWeight = FontWeight.SemiBold)
+                    detectedProject?.let { project ->
+                        Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                            Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.FolderOpen, null)
+                                Spacer(Modifier.width(10.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text("Projekt erkannt", fontWeight = FontWeight.Bold)
+                                    Text("${project.projectNo} · ${project.projectName}", style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+                        }
+                        Button(onClick = { openProject(project) }, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Default.OpenInNew, null); Spacer(Modifier.width(8.dp)); Text("Projekt öffnen")
+                        }
+                    }
+                    if (detectedProject == null) {
+                        Button(onClick = { searchMaterial(scannedValue) }, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Default.Inventory2, null); Spacer(Modifier.width(8.dp)); Text("Als Material suchen")
+                        }
+                    }
+                    if (scannedValue.startsWith("http://", true) || scannedValue.startsWith("https://", true)) {
+                        FilledTonalButton(
+                            onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(scannedValue))) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Link, null); Spacer(Modifier.width(8.dp)); Text("Link öffnen")
+                        }
+                    }
+                    OutlinedButton(onClick = { scannedValue = ""; scanError = null }, modifier = Modifier.fillMaxWidth()) {
+                        Icon(Icons.Default.Refresh, null); Spacer(Modifier.width(8.dp)); Text("Neuen Code scannen")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ScannerUseRow(icon: ImageVector, title: String, subtitle: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Surface(shape = RoundedCornerShape(13.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
+            Icon(icon, null, Modifier.padding(9.dp).size(22.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
+        }
+        Spacer(Modifier.width(12.dp))
+        Column {
+            Text(title, fontWeight = FontWeight.Bold)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+private fun findProjectFromScan(value: String, projects: List<ProjectDto>): ProjectDto? {
+    val clean = value.trim()
+    if (clean.isBlank()) return null
+    val id = Regex("(?i)(?:project|projekt)[/:#\\s-]*(\\d+)").find(clean)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        ?: Regex("/project/(\\d+)").find(clean)?.groupValues?.getOrNull(1)?.toIntOrNull()
+    return projects.firstOrNull { it.id == id }
+        ?: projects.firstOrNull { it.projectNo.equals(clean, true) }
+        ?: projects.firstOrNull { clean.contains(it.projectNo, true) }
+}
+
+@Composable
+private fun MaterialScreen(
+    state: DataState,
+    initialQuery: String,
+    loadMaterials: (String) -> Unit
+) {
+    var query by remember(initialQuery) { mutableStateOf(initialQuery) }
+    LaunchedEffect(initialQuery) { loadMaterials(initialQuery) }
     ScreenColumn {
         Text("Material", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         OutlinedTextField(
@@ -3040,6 +3205,7 @@ private fun DocumentsScreen(
 ) {
     val context = LocalContext.current
     var search by remember { mutableStateOf("") }
+    val expandedFolders = remember { mutableStateMapOf<String, Boolean>() }
     val project = state.selectedProject
 
     ScreenColumn {
@@ -3056,17 +3222,12 @@ private fun DocumentsScreen(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(20.dp)
                     ) {
-                        Row(
-                            Modifier.fillMaxWidth().padding(16.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
+                        Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Default.Folder, null, tint = parseColor(item.color))
                             Spacer(Modifier.width(12.dp))
                             Column(Modifier.weight(1f)) {
                                 Text(item.projectName, fontWeight = FontWeight.Bold)
-                                if (item.projectNo.isNotBlank()) {
-                                    Text(item.projectNo, style = MaterialTheme.typography.bodySmall)
-                                }
+                                if (item.projectNo.isNotBlank()) Text(item.projectNo, style = MaterialTheme.typography.bodySmall)
                             }
                             Icon(Icons.Default.ChevronRight, null)
                         }
@@ -3077,21 +3238,14 @@ private fun DocumentsScreen(
         }
 
         Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
-            Row(
-                Modifier.fillMaxWidth().padding(16.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.FolderOpen, null, tint = parseColor(project.color))
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text(project.projectName, fontWeight = FontWeight.Bold)
-                    if (project.projectNo.isNotBlank()) {
-                        Text(project.projectNo, style = MaterialTheme.typography.bodySmall)
-                    }
+                    if (project.projectNo.isNotBlank()) Text(project.projectNo, style = MaterialTheme.typography.bodySmall)
                 }
-                IconButton(onClick = refresh) {
-                    Icon(Icons.Default.Refresh, "Dokumente aktualisieren")
-                }
+                IconButton(onClick = refresh) { Icon(Icons.Default.Refresh, "Dokumente aktualisieren") }
             }
         }
 
@@ -3099,7 +3253,7 @@ private fun DocumentsScreen(
             value = search,
             onValueChange = { search = it },
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("Dokument suchen") },
+            label = { Text("Datei oder Ordner suchen") },
             leadingIcon = { Icon(Icons.Default.Search, null) },
             singleLine = true
         )
@@ -3111,46 +3265,84 @@ private fun DocumentsScreen(
                 val filtered = state.documents.filter { document ->
                     search.isBlank() ||
                         document.fileName.contains(search, ignoreCase = true) ||
-                        document.documentType.contains(search, ignoreCase = true) ||
-                        document.mimeType.contains(search, ignoreCase = true)
+                        document.filePath.contains(search, ignoreCase = true) ||
+                        document.documentType.contains(search, ignoreCase = true)
                 }
-
                 if (filtered.isEmpty()) {
-                    EmptyState(
-                        if (search.isBlank()) "Keine Dokumente in diesem Projekt."
-                        else "Keine passenden Dokumente gefunden."
-                    )
+                    EmptyState(if (search.isBlank()) "Keine Dokumente in diesem Projekt." else "Keine passenden Dokumente gefunden.")
                 } else {
+                    val grouped = groupDocumentsByFolder(filtered)
                     Text(
-                        "${filtered.size} Dokumente",
+                        "${grouped.size} Ordner · ${filtered.size} Dateien",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
-                    filtered.forEach { document ->
-                        DocumentCard(
-                            document = document,
-                            onOpen = {
-                                val cleanServer = server.trim().trimEnd('/')
-                                val directory = document.filePath
-                                    .substringBeforeLast('/', "")
-                                    .let { if (it.startsWith("/")) it else "/$it" }
-                                val target = buildString {
-                                    append(cleanServer)
-                                    append("/index.php/apps/files/?dir=")
-                                    append(Uri.encode(directory))
-                                    if (document.fileName.isNotBlank()) {
-                                        append("&scrollto=")
-                                        append(Uri.encode(document.fileName))
+                    grouped.forEach { (folder, documents) ->
+                        val expanded = expandedFolders[folder] ?: true
+                        Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
+                            Column {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().clickable { expandedFolders[folder] = !expanded }.padding(16.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Surface(shape = RoundedCornerShape(13.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                                        Icon(
+                                            if (expanded) Icons.Default.FolderOpen else Icons.Default.Folder,
+                                            null,
+                                            Modifier.padding(9.dp).size(24.dp),
+                                            tint = MaterialTheme.colorScheme.onPrimaryContainer
+                                        )
+                                    }
+                                    Spacer(Modifier.width(12.dp))
+                                    Column(Modifier.weight(1f)) {
+                                        Text(folder, fontWeight = FontWeight.Bold)
+                                        Text("${documents.size} Dateien", style = MaterialTheme.typography.bodySmall)
+                                    }
+                                    Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null)
+                                }
+                                if (expanded) {
+                                    HorizontalDivider()
+                                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                        documents.sortedBy { it.fileName.lowercase() }.forEach { document ->
+                                            DocumentCard(document = document, onOpen = {
+                                                val cleanServer = server.trim().trimEnd('/')
+                                                val directory = document.filePath.substringBeforeLast('/', "").let { if (it.startsWith("/")) it else "/$it" }
+                                                val target = buildString {
+                                                    append(cleanServer)
+                                                    append("/index.php/apps/files/?dir=")
+                                                    append(Uri.encode(directory))
+                                                    if (document.fileName.isNotBlank()) {
+                                                        append("&scrollto=")
+                                                        append(Uri.encode(document.fileName))
+                                                    }
+                                                }
+                                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(target)))
+                                            })
+                                        }
                                     }
                                 }
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(target)))
                             }
-                        )
+                        }
                     }
                 }
             }
         }
     }
+}
+
+private fun groupDocumentsByFolder(documents: List<DocumentDto>): Map<String, List<DocumentDto>> {
+    if (documents.isEmpty()) return emptyMap()
+    val directories = documents.map { it.filePath.trim('/').substringBeforeLast('/', "") }
+    val splitDirectories = directories.map { dir -> dir.split('/').filter { it.isNotBlank() } }
+    val commonCount = splitDirectories.minOfOrNull { it.size }?.let { max ->
+        (0 until max).takeWhile { index -> splitDirectories.map { it[index] }.distinct().size == 1 }.count()
+    } ?: 0
+
+    return documents.groupBy { document ->
+        val parts = document.filePath.trim('/').substringBeforeLast('/', "").split('/').filter { it.isNotBlank() }
+        val relative = parts.drop(commonCount)
+        if (relative.isEmpty()) "Projektordner" else relative.joinToString(" / ")
+    }.toSortedMap(String.CASE_INSENSITIVE_ORDER)
 }
 
 @Composable
@@ -3231,7 +3423,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
         Text("Mehr", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Text(login.displayName, fontWeight = FontWeight.Bold)
         Text(roleLabel(login.role))
-        Text("NextERP Mobile 1.9.0 · API v1")
+        Text("NextERP Mobile 2.0.0 · API v1")
         OutlinedButton(onClick = logout, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Logout, null); Spacer(Modifier.width(8.dp)); Text("Abmelden") }
     }
 }
