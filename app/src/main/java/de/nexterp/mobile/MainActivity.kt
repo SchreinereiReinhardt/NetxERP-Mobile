@@ -191,6 +191,9 @@ data class DataState(
     val photosLoading: Boolean = false,
     val photosProjectId: Int? = null,
     val photosError: String? = null,
+    val photoUploadLoading: Boolean = false,
+    val photoUploadError: String? = null,
+    val photoUploadSuccess: String? = null,
     val selectedProject: ProjectDto? = null,
     val error: String? = null
 )
@@ -281,6 +284,65 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         dataState = dataState.copy(selectedProject = project)
         screen = Screen.PHOTOS
         loadProjectPhotos(project.id)
+    }
+
+    fun uploadProjectPhoto(
+        projectId: Int,
+        category: String,
+        uri: Uri,
+        fileName: String
+    ) {
+        if (dataState.photoUploadLoading) return
+        viewModelScope.launch {
+            dataState = dataState.copy(
+                photoUploadLoading = true,
+                photoUploadError = null,
+                photoUploadSuccess = null
+            )
+
+            val bytesResult = runCatching {
+                getApplication<Application>().contentResolver
+                    .openInputStream(uri)
+                    ?.use { it.readBytes() }
+                    ?: error("Foto konnte nicht gelesen werden.")
+            }
+
+            if (bytesResult.isFailure) {
+                dataState = dataState.copy(
+                    photoUploadLoading = false,
+                    photoUploadError = bytesResult.exceptionOrNull()?.message
+                        ?: "Foto konnte nicht gelesen werden."
+                )
+                return@launch
+            }
+
+            val uploadResult = authorizedRequest { token ->
+                NextErpApi.uploadPhoto(
+                    server = loginState.server,
+                    token = token,
+                    projectId = projectId,
+                    category = category,
+                    fileName = fileName,
+                    bytes = bytesResult.getOrThrow()
+                )
+            }
+
+            if (uploadResult.isFailure) {
+                dataState = dataState.copy(
+                    photoUploadLoading = false,
+                    photoUploadError = uploadResult.exceptionOrNull()?.message
+                        ?: "Foto konnte nicht hochgeladen werden."
+                )
+                return@launch
+            }
+
+            dataState = dataState.copy(
+                photoUploadLoading = false,
+                photoUploadError = null,
+                photoUploadSuccess = "Foto wurde hochgeladen."
+            )
+            loadProjectPhotos(projectId)
+        }
     }
 
     fun loadProjectPhotos(projectId: Int) {
@@ -1254,6 +1316,7 @@ private fun AppShell(vm: AppViewModel) {
                     server = vm.loginState.server,
                     token = vm.bearerToken,
                     selectProject = vm::openProjectPhotos,
+                    uploadPhoto = vm::uploadProjectPhoto,
                     refresh = { vm.dataState.selectedProject?.let { vm.loadProjectPhotos(it.id) } }
                 )
                 Screen.SCANNER -> PlaceholderScreen("Scanner", "Dokumente und QR-Codes folgen im nächsten Ausbau.", Icons.Default.QrCodeScanner)
@@ -2156,11 +2219,64 @@ private fun ProjectPhotosScreen(
     server: String,
     token: String,
     selectProject: (ProjectDto) -> Unit,
+    uploadPhoto: (Int, String, Uri, String) -> Unit,
     refresh: () -> Unit
 ) {
     val context = LocalContext.current
     val project = state.selectedProject
     var selectedPhoto by remember { mutableStateOf<DocumentDto?>(null) }
+    var selectedCategory by remember { mutableStateOf("Montage") }
+    var pendingCameraFile by remember { mutableStateOf<File?>(null) }
+
+    val cameraLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+        val file = pendingCameraFile
+        if (success && file != null && file.exists() && file.length() > 0L && project != null) {
+            val uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                file
+            )
+            uploadPhoto(project.id, selectedCategory, uri, file.name)
+        } else {
+            file?.delete()
+        }
+        pendingCameraFile = null
+    }
+
+    val galleryLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null && project != null) {
+            val name = projectPhotoFileName(context, uri, selectedCategory)
+            uploadPhoto(project.id, selectedCategory, uri, name)
+        }
+    }
+
+    fun takeProjectPhoto() {
+        val currentProject = project ?: return
+        val folder = File(context.cacheDir, "project_photos").apply { mkdirs() }
+        val safeProject = currentProject.projectNo.ifBlank { currentProject.id.toString() }
+            .replace(Regex("[^A-Za-z0-9_-]"), "_")
+        val safeCategory = selectedCategory
+            .lowercase()
+            .replace("ä", "ae")
+            .replace("ö", "oe")
+            .replace("ü", "ue")
+            .replace(Regex("[^a-z0-9_-]"), "_")
+        val file = File(
+            folder,
+            "${safeProject}_${safeCategory}_${System.currentTimeMillis()}.jpg"
+        )
+        pendingCameraFile = file
+        val uri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            file
+        )
+        cameraLauncher.launch(uri)
+    }
 
     ScreenColumn {
         Text("Projektfotos", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
@@ -2196,6 +2312,94 @@ private fun ProjectPhotosScreen(
                     Text(project.projectNo, style = MaterialTheme.typography.bodySmall)
                 }
                 IconButton(onClick = refresh) { Icon(Icons.Default.Refresh, "Fotos aktualisieren") }
+            }
+        }
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(22.dp)
+        ) {
+            Column(
+                Modifier.fillMaxWidth().padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "Neues Projektfoto",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    "Kategorie auswählen und anschließend fotografieren oder ein vorhandenes Bild wählen.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+
+                val categories = listOf(
+                    "Vorher",
+                    "Montage",
+                    "Nachher",
+                    "Schaden",
+                    "Abnahme",
+                    "Sonstige"
+                )
+                categories.chunked(3).forEach { row ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        row.forEach { category ->
+                            FilterChip(
+                                selected = selectedCategory == category,
+                                onClick = { selectedCategory = category },
+                                label = { Text(category) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Button(
+                        onClick = { takeProjectPhoto() },
+                        enabled = !state.photoUploadLoading,
+                        modifier = Modifier.weight(1f).height(56.dp),
+                        shape = RoundedCornerShape(18.dp)
+                    ) {
+                        Icon(Icons.Default.PhotoCamera, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Aufnehmen")
+                    }
+                    FilledTonalButton(
+                        onClick = { galleryLauncher.launch("image/*") },
+                        enabled = !state.photoUploadLoading,
+                        modifier = Modifier.weight(1f).height(56.dp),
+                        shape = RoundedCornerShape(18.dp)
+                    ) {
+                        Icon(Icons.Default.PhotoLibrary, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Galerie")
+                    }
+                }
+
+                if (state.photoUploadLoading) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(22.dp),
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text("Foto wird hochgeladen …")
+                    }
+                }
+
+                state.photoUploadSuccess?.let {
+                    Text(it, color = MaterialTheme.colorScheme.primary)
+                }
+                state.photoUploadError?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error)
+                }
             }
         }
 
@@ -2267,6 +2471,39 @@ private fun ProjectPhotoCard(
             }
         }
     }
+}
+
+private fun projectPhotoFileName(
+    context: android.content.Context,
+    uri: Uri,
+    category: String
+): String {
+    var originalName: String? = null
+    context.contentResolver.query(
+        uri,
+        arrayOf(OpenableColumns.DISPLAY_NAME),
+        null,
+        null,
+        null
+    )?.use { cursor ->
+        if (cursor.moveToFirst()) {
+            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (index >= 0) originalName = cursor.getString(index)
+        }
+    }
+
+    val extension = originalName
+        ?.substringAfterLast('.', "")
+        ?.takeIf { it.isNotBlank() }
+        ?: "jpg"
+    val safeCategory = category
+        .lowercase()
+        .replace("ä", "ae")
+        .replace("ö", "oe")
+        .replace("ü", "ue")
+        .replace(Regex("[^a-z0-9_-]"), "_")
+
+    return "${System.currentTimeMillis()}_${safeCategory}.$extension"
 }
 
 private fun remotePhotoRequest(
@@ -2494,7 +2731,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
         Text("Mehr", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Text(login.displayName, fontWeight = FontWeight.Bold)
         Text(roleLabel(login.role))
-        Text("NextERP Mobile 1.6.0 · API v1")
+        Text("NextERP Mobile 1.7.0 · API v1")
         OutlinedButton(onClick = logout, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Logout, null); Spacer(Modifier.width(8.dp)); Text("Abmelden") }
     }
 }
