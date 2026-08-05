@@ -37,6 +37,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.FileProvider
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -55,7 +56,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
-enum class Screen { TODAY, PROJECTS, PROJECT, TIME_ENTRY, REPORT, SCANNER, MATERIAL, DOCUMENTS, MORE }
+enum class Screen { TODAY, PROJECTS, PROJECT, TIME_ENTRY, REPORT, PHOTOS, SCANNER, MATERIAL, DOCUMENTS, MORE }
 
 data class LoginState(
     val server: String = "https://cloud.kassel-net.de",
@@ -186,6 +187,10 @@ data class DataState(
     val documentsLoading: Boolean = false,
     val documentsProjectId: Int? = null,
     val documentsError: String? = null,
+    val photos: List<DocumentDto> = emptyList(),
+    val photosLoading: Boolean = false,
+    val photosProjectId: Int? = null,
+    val photosError: String? = null,
     val selectedProject: ProjectDto? = null,
     val error: String? = null
 )
@@ -257,6 +262,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun updateServer(value: String) { loginState = loginState.copy(server = value) }
     fun updateUsername(value: String) { loginState = loginState.copy(username = value) }
     fun updatePassword(value: String) { loginState = loginState.copy(password = value) }
+    val bearerToken: String get() = accessToken
+
     fun navigate(target: Screen) { screen = target }
 
     fun openProject(project: ProjectDto) {
@@ -268,6 +275,34 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         dataState = dataState.copy(selectedProject = project)
         screen = Screen.DOCUMENTS
         loadProjectDocuments(project.id)
+    }
+
+    fun openProjectPhotos(project: ProjectDto) {
+        dataState = dataState.copy(selectedProject = project)
+        screen = Screen.PHOTOS
+        loadProjectPhotos(project.id)
+    }
+
+    fun loadProjectPhotos(projectId: Int) {
+        viewModelScope.launch {
+            dataState = dataState.copy(photosLoading = true, photosProjectId = projectId, photosError = null)
+            val result = authorizedRequest { token -> NextErpApi.projectPhotos(loginState.server, token, projectId) }
+            dataState = if (result.isSuccess) {
+                dataState.copy(
+                    photos = result.getOrNull().orEmpty(),
+                    photosLoading = false,
+                    photosProjectId = projectId,
+                    photosError = null
+                )
+            } else {
+                dataState.copy(
+                    photos = emptyList(),
+                    photosLoading = false,
+                    photosProjectId = projectId,
+                    photosError = result.exceptionOrNull()?.message ?: "Fotos konnten nicht geladen werden."
+                )
+            }
+        }
     }
 
     fun loadProjectDocuments(projectId: Int) {
@@ -965,6 +1000,17 @@ object NextErpApi {
         }
     }
 
+    suspend fun projectPhotos(server: String, token: String, projectId: Int): Result<List<DocumentDto>> = runCatching {
+        when (val data = request(server, "/project/$projectId/photos", token = token)) {
+            is org.json.JSONArray -> data.toDocuments()
+            is JSONObject -> data.optJSONArray("photos").toDocuments()
+            else -> emptyList()
+        }
+    }
+
+    fun projectPhotoUrl(server: String, projectId: Int, photoId: Int): String =
+        apiBase(server) + "/project/$projectId/photos/$photoId/content"
+
     suspend fun createTime(
         server: String,
         token: String,
@@ -1196,10 +1242,20 @@ private fun AppShell(vm: AppViewModel) {
                     openDocuments = {
                         vm.dataState.selectedProject?.let(vm::openProjectDocuments)
                     },
+                    openPhotos = {
+                        vm.dataState.selectedProject?.let(vm::openProjectPhotos)
+                    },
                     openReport = vm::openReport
                 )
                 Screen.TIME_ENTRY -> TimeEntryScreen(vm.dataState.selectedProject, vm.timeEntryState, vm.dataState.materials, vm.dataState.materialsLoading, vm)
                 Screen.REPORT -> ReportScreen(vm.dataState.selectedProject, vm.reportState, vm.dataState.materials, vm.dataState.materialsLoading, vm)
+                Screen.PHOTOS -> ProjectPhotosScreen(
+                    state = vm.dataState,
+                    server = vm.loginState.server,
+                    token = vm.bearerToken,
+                    selectProject = vm::openProjectPhotos,
+                    refresh = { vm.dataState.selectedProject?.let { vm.loadProjectPhotos(it.id) } }
+                )
                 Screen.SCANNER -> PlaceholderScreen("Scanner", "Dokumente und QR-Codes folgen im nächsten Ausbau.", Icons.Default.QrCodeScanner)
                 Screen.MATERIAL -> MaterialScreen(vm.dataState, vm::loadMaterials)
                 Screen.DOCUMENTS -> DocumentsScreen(
@@ -1219,7 +1275,7 @@ private fun AppShell(vm: AppViewModel) {
 @Composable
 private fun AppHeader(name: String, role: String, screen: Screen, onRefresh: () -> Unit, onLogout: () -> Unit) {
     val title = when (screen) {
-        Screen.TODAY -> "Heute"; Screen.PROJECTS -> "Projekte"; Screen.PROJECT -> "Projekt"; Screen.TIME_ENTRY -> "Zeiten"; Screen.REPORT -> "Rapport"; Screen.SCANNER -> "Scanner"; Screen.MATERIAL -> "Material"; Screen.DOCUMENTS -> "Dokumente"; Screen.MORE -> "Mehr"
+        Screen.TODAY -> "Heute"; Screen.PROJECTS -> "Projekte"; Screen.PROJECT -> "Projekt"; Screen.TIME_ENTRY -> "Zeiten"; Screen.REPORT -> "Rapport"; Screen.PHOTOS -> "Fotos"; Screen.SCANNER -> "Scanner"; Screen.MATERIAL -> "Material"; Screen.DOCUMENTS -> "Dokumente"; Screen.MORE -> "Mehr"
     }
     Surface(tonalElevation = 2.dp) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1309,6 +1365,7 @@ private fun ProjectScreen(
     project: ProjectDto?,
     openTimeEntry: () -> Unit,
     openDocuments: () -> Unit,
+    openPhotos: () -> Unit,
     openReport: () -> Unit
 ) {
     if (project == null) { ScreenColumn { EmptyState("Kein Projekt ausgewählt.") }; return }
@@ -1326,7 +1383,7 @@ private fun ProjectScreen(
         PrimaryAction("Arbeitszeit eintragen", Icons.Default.Schedule, openTimeEntry)
         PrimaryAction("Material", Icons.Default.Inventory2) {}
         PrimaryAction("Dokumente", Icons.Default.Description, openDocuments)
-        PrimaryAction("Fotos", Icons.Default.PhotoCamera) {}
+        PrimaryAction("Fotos", Icons.Default.PhotoCamera, openPhotos)
         PrimaryAction("Rapport erstellen", Icons.Default.EditNote, openReport)
     }
 }
@@ -2092,6 +2149,151 @@ private fun EmptyState(message: String) {
     Card(Modifier.fillMaxWidth()) { Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) { Icon(Icons.Default.Info, null, Modifier.size(36.dp)); Spacer(Modifier.height(10.dp)); Text(message) } }
 }
 
+
+@Composable
+private fun ProjectPhotosScreen(
+    state: DataState,
+    server: String,
+    token: String,
+    selectProject: (ProjectDto) -> Unit,
+    refresh: () -> Unit
+) {
+    val context = LocalContext.current
+    val project = state.selectedProject
+    var selectedPhoto by remember { mutableStateOf<DocumentDto?>(null) }
+
+    ScreenColumn {
+        Text("Projektfotos", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+
+        if (project == null) {
+            Text("Zuerst ein Projekt auswählen.")
+            state.projects.forEach { item ->
+                Card(
+                    onClick = { selectProject(item) },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(20.dp)
+                ) {
+                    Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Folder, null, tint = parseColor(item.color))
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(item.projectName, fontWeight = FontWeight.Bold)
+                            Text(item.projectNo, style = MaterialTheme.typography.bodySmall)
+                        }
+                        Icon(Icons.Default.ChevronRight, null)
+                    }
+                }
+            }
+            return@ScreenColumn
+        }
+
+        Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
+            Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.PhotoLibrary, null, tint = parseColor(project.color))
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(project.projectName, fontWeight = FontWeight.Bold)
+                    Text(project.projectNo, style = MaterialTheme.typography.bodySmall)
+                }
+                IconButton(onClick = refresh) { Icon(Icons.Default.Refresh, "Fotos aktualisieren") }
+            }
+        }
+
+        when {
+            state.photosLoading -> LoadingState()
+            state.photosError != null -> ErrorState(state.photosError, refresh)
+            state.photos.isEmpty() -> EmptyState("Noch keine Fotos in diesem Projekt.")
+            else -> state.photos.groupBy(::photoCategory).forEach { (category, photos) ->
+                Text("$category · ${photos.size}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                photos.chunked(2).forEach { row ->
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        row.forEach { photo ->
+                            ProjectPhotoCard(
+                                photo = photo,
+                                server = server,
+                                token = token,
+                                modifier = Modifier.weight(1f),
+                                onClick = { selectedPhoto = photo }
+                            )
+                        }
+                        if (row.size == 1) Spacer(Modifier.weight(1f))
+                    }
+                }
+            }
+        }
+    }
+
+    selectedPhoto?.let { photo ->
+        Dialog(onDismissRequest = { selectedPhoto = null }) {
+            Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
+                Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    AsyncImage(
+                        model = remotePhotoRequest(context, server, token, project!!.id, photo.id),
+                        contentDescription = photo.fileName,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 260.dp, max = 620.dp),
+                        contentScale = ContentScale.Fit
+                    )
+                    Text(photoCategory(photo), fontWeight = FontWeight.Bold)
+                    Text(photo.fileName, style = MaterialTheme.typography.bodySmall)
+                    Button(onClick = { selectedPhoto = null }, modifier = Modifier.fillMaxWidth()) {
+                        Text("Schließen")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProjectPhotoCard(
+    photo: DocumentDto,
+    server: String,
+    token: String,
+    modifier: Modifier,
+    onClick: () -> Unit
+) {
+    val context = LocalContext.current
+    Card(modifier = modifier.clickable(onClick = onClick), shape = RoundedCornerShape(18.dp)) {
+        Column {
+            AsyncImage(
+                model = remotePhotoRequest(context, server, token, photo.projectId, photo.id),
+                contentDescription = photo.fileName,
+                modifier = Modifier.fillMaxWidth().height(150.dp),
+                contentScale = ContentScale.Crop
+            )
+            Column(Modifier.padding(10.dp)) {
+                Text(photoCategory(photo), fontWeight = FontWeight.Bold)
+                Text(photo.fileName, maxLines = 2, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
+private fun remotePhotoRequest(
+    context: android.content.Context,
+    server: String,
+    token: String,
+    projectId: Int,
+    photoId: Int
+): ImageRequest = ImageRequest.Builder(context)
+    .data(NextErpApi.projectPhotoUrl(server, projectId, photoId))
+    .addHeader("Authorization", "Bearer $token")
+    .crossfade(true)
+    .build()
+
+private fun photoCategory(photo: DocumentDto): String {
+    if (photo.status.startsWith("photo_")) return photo.status.removePrefix("photo_")
+    val path = photo.filePath.lowercase()
+    return when {
+        "/vorher/" in path -> "Vorher"
+        "/nachher/" in path -> "Nachher"
+        "/montage/" in path -> "Montage"
+        "/schaden/" in path -> "Schaden"
+        "/abnahme/" in path -> "Abnahme"
+        else -> "Sonstige"
+    }
+}
+
 @Composable
 private fun DocumentsScreen(
     state: DataState,
@@ -2292,7 +2494,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
         Text("Mehr", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Text(login.displayName, fontWeight = FontWeight.Bold)
         Text(roleLabel(login.role))
-        Text("NextERP Mobile 1.5.1 · API v1")
+        Text("NextERP Mobile 1.6.0 · API v1")
         OutlinedButton(onClick = logout, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Logout, null); Spacer(Modifier.width(8.dp)); Text("Abmelden") }
     }
 }
