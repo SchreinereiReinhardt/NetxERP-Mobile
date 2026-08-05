@@ -3205,14 +3205,26 @@ private fun DocumentsScreen(
 ) {
     val context = LocalContext.current
     var search by remember { mutableStateOf("") }
-    val expandedFolders = remember { mutableStateMapOf<String, Boolean>() }
+    var currentPath by remember { mutableStateOf<List<String>>(emptyList()) }
     val project = state.selectedProject
 
+    LaunchedEffect(project?.id) {
+        currentPath = emptyList()
+        search = ""
+    }
+
     ScreenColumn {
-        Text("Dokumente", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Text(
+            "Dokumente",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold
+        )
 
         if (project == null) {
-            Text("Zuerst ein Projekt auswählen.", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                "Zuerst ein Projekt auswählen.",
+                style = MaterialTheme.typography.bodyLarge
+            )
             if (state.projects.isEmpty()) {
                 EmptyState("Keine Projekte verfügbar.")
             } else {
@@ -3222,12 +3234,24 @@ private fun DocumentsScreen(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(20.dp)
                     ) {
-                        Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Folder, null, tint = parseColor(item.color))
+                        Row(
+                            Modifier.fillMaxWidth().padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.Folder,
+                                null,
+                                tint = parseColor(item.color)
+                            )
                             Spacer(Modifier.width(12.dp))
                             Column(Modifier.weight(1f)) {
                                 Text(item.projectName, fontWeight = FontWeight.Bold)
-                                if (item.projectNo.isNotBlank()) Text(item.projectNo, style = MaterialTheme.typography.bodySmall)
+                                if (item.projectNo.isNotBlank()) {
+                                    Text(
+                                        item.projectNo,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
                             }
                             Icon(Icons.Default.ChevronRight, null)
                         }
@@ -3237,15 +3261,44 @@ private fun DocumentsScreen(
             return@ScreenColumn
         }
 
-        Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
-            Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.FolderOpen, null, tint = parseColor(project.color))
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(22.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.primaryContainer
+            )
+        ) {
+            Row(
+                Modifier.fillMaxWidth().padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Default.FolderOpen,
+                    null,
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer
+                )
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(project.projectName, fontWeight = FontWeight.Bold)
-                    if (project.projectNo.isNotBlank()) Text(project.projectNo, style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        project.projectName,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                    if (project.projectNo.isNotBlank()) {
+                        Text(
+                            project.projectNo,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
                 }
-                IconButton(onClick = refresh) { Icon(Icons.Default.Refresh, "Dokumente aktualisieren") }
+                IconButton(onClick = refresh) {
+                    Icon(
+                        Icons.Default.Refresh,
+                        "Dokumente aktualisieren",
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                }
             }
         }
 
@@ -3255,74 +3308,140 @@ private fun DocumentsScreen(
             modifier = Modifier.fillMaxWidth(),
             label = { Text("Datei oder Ordner suchen") },
             leadingIcon = { Icon(Icons.Default.Search, null) },
-            singleLine = true
+            trailingIcon = {
+                if (search.isNotBlank()) {
+                    IconButton(onClick = { search = "" }) {
+                        Icon(Icons.Default.Close, "Suche löschen")
+                    }
+                }
+            },
+            singleLine = true,
+            shape = RoundedCornerShape(18.dp)
         )
 
         when {
             state.documentsLoading -> LoadingState()
             state.documentsError != null -> ErrorState(state.documentsError, refresh)
+            state.documents.isEmpty() -> EmptyState("Keine Dokumente in diesem Projekt.")
             else -> {
-                val filtered = state.documents.filter { document ->
-                    search.isBlank() ||
-                        document.fileName.contains(search, ignoreCase = true) ||
-                        document.filePath.contains(search, ignoreCase = true) ||
-                        document.documentType.contains(search, ignoreCase = true)
-                }
-                if (filtered.isEmpty()) {
-                    EmptyState(if (search.isBlank()) "Keine Dokumente in diesem Projekt." else "Keine passenden Dokumente gefunden.")
-                } else {
-                    val grouped = groupDocumentsByFolder(filtered)
+                val browser = buildDocumentBrowser(state.documents)
+
+                if (search.isNotBlank()) {
+                    val results = browser.files.filter { item ->
+                        item.document.fileName.contains(search, ignoreCase = true) ||
+                            item.relativeFolder.joinToString(" / ")
+                                .contains(search, ignoreCase = true) ||
+                            item.document.documentType.contains(search, ignoreCase = true)
+                    }
+
                     Text(
-                        "${grouped.size} Ordner · ${filtered.size} Dateien",
+                        "${results.size} Suchergebnisse",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
-                    grouped.forEach { (folder, documents) ->
-                        val expanded = expandedFolders[folder] ?: true
-                        Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
-                            Column {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth().clickable { expandedFolders[folder] = !expanded }.padding(16.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Surface(shape = RoundedCornerShape(13.dp), color = MaterialTheme.colorScheme.primaryContainer) {
-                                        Icon(
-                                            if (expanded) Icons.Default.FolderOpen else Icons.Default.Folder,
-                                            null,
-                                            Modifier.padding(9.dp).size(24.dp),
-                                            tint = MaterialTheme.colorScheme.onPrimaryContainer
+
+                    if (results.isEmpty()) {
+                        EmptyState("Keine passenden Dokumente gefunden.")
+                    } else {
+                        results
+                            .sortedWith(
+                                compareBy<DocumentBrowserFile>(
+                                    { it.relativeFolder.joinToString("/") },
+                                    { it.document.fileName.lowercase() }
+                                )
+                            )
+                            .forEach { item ->
+                                DocumentCard(
+                                    document = item.document,
+                                    folderLabel = item.relativeFolder
+                                        .joinToString(" / ")
+                                        .ifBlank { "Projektordner" },
+                                    onOpen = {
+                                        openDocumentInNextcloud(
+                                            context,
+                                            server,
+                                            item.document
                                         )
                                     }
-                                    Spacer(Modifier.width(12.dp))
-                                    Column(Modifier.weight(1f)) {
-                                        Text(folder, fontWeight = FontWeight.Bold)
-                                        Text("${documents.size} Dateien", style = MaterialTheme.typography.bodySmall)
-                                    }
-                                    Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null)
-                                }
-                                if (expanded) {
-                                    HorizontalDivider()
-                                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                        documents.sortedBy { it.fileName.lowercase() }.forEach { document ->
-                                            DocumentCard(document = document, onOpen = {
-                                                val cleanServer = server.trim().trimEnd('/')
-                                                val directory = document.filePath.substringBeforeLast('/', "").let { if (it.startsWith("/")) it else "/$it" }
-                                                val target = buildString {
-                                                    append(cleanServer)
-                                                    append("/index.php/apps/files/?dir=")
-                                                    append(Uri.encode(directory))
-                                                    if (document.fileName.isNotBlank()) {
-                                                        append("&scrollto=")
-                                                        append(Uri.encode(document.fileName))
-                                                    }
-                                                }
-                                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(target)))
-                                            })
-                                        }
-                                    }
-                                }
+                                )
+                            }
+                    }
+                } else {
+                    DocumentBreadcrumb(
+                        projectName = project.projectNo.ifBlank { project.projectName },
+                        currentPath = currentPath,
+                        navigateTo = { depth ->
+                            currentPath = currentPath.take(depth)
+                        }
+                    )
+
+                    val childFolders = browser.directChildFolders(currentPath)
+                    val currentFiles = browser.filesInFolder(currentPath)
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            when {
+                                currentPath.isEmpty() -> "Projektordner"
+                                else -> currentPath.last()
+                            },
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            "${childFolders.size} Ordner · ${currentFiles.size} Dateien",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    if (currentPath.isNotEmpty()) {
+                        Card(
+                            onClick = { currentPath = currentPath.dropLast(1) },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(18.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant
+                            )
+                        ) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(14.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.ArrowUpward, null)
+                                Spacer(Modifier.width(12.dp))
+                                Text("Eine Ebene höher", fontWeight = FontWeight.SemiBold)
                             }
                         }
+                    }
+
+                    childFolders.forEach { folder ->
+                        DocumentFolderCard(
+                            name = folder.name,
+                            folderCount = folder.folderCount,
+                            fileCount = folder.fileCount,
+                            onOpen = { currentPath = currentPath + folder.name }
+                        )
+                    }
+
+                    currentFiles
+                        .sortedBy { it.document.fileName.lowercase() }
+                        .forEach { item ->
+                            DocumentCard(
+                                document = item.document,
+                                folderLabel = null,
+                                onOpen = {
+                                    openDocumentInNextcloud(
+                                        context,
+                                        server,
+                                        item.document
+                                    )
+                                }
+                            )
+                        }
+
+                    if (childFolders.isEmpty() && currentFiles.isEmpty()) {
+                        EmptyState("Dieser Ordner ist leer.")
                     }
                 }
             }
@@ -3330,31 +3449,199 @@ private fun DocumentsScreen(
     }
 }
 
-private fun groupDocumentsByFolder(documents: List<DocumentDto>): Map<String, List<DocumentDto>> {
-    if (documents.isEmpty()) return emptyMap()
-    val directories = documents.map { it.filePath.trim('/').substringBeforeLast('/', "") }
-    val splitDirectories = directories.map { dir -> dir.split('/').filter { it.isNotBlank() } }
-    val commonCount = splitDirectories.minOfOrNull { it.size }?.let { max ->
-        (0 until max).takeWhile { index -> splitDirectories.map { it[index] }.distinct().size == 1 }.count()
+private data class DocumentBrowserFile(
+    val document: DocumentDto,
+    val relativeFolder: List<String>
+)
+
+private data class DocumentBrowserFolder(
+    val name: String,
+    val folderCount: Int,
+    val fileCount: Int
+)
+
+private data class DocumentBrowser(
+    val files: List<DocumentBrowserFile>
+) {
+    fun filesInFolder(path: List<String>): List<DocumentBrowserFile> =
+        files.filter { it.relativeFolder == path }
+
+    fun directChildFolders(path: List<String>): List<DocumentBrowserFolder> {
+        val names = files.mapNotNull { file ->
+            if (
+                file.relativeFolder.size > path.size &&
+                file.relativeFolder.take(path.size) == path
+            ) {
+                file.relativeFolder[path.size]
+            } else {
+                null
+            }
+        }.distinct().sortedWith(String.CASE_INSENSITIVE_ORDER)
+
+        return names.map { name ->
+            val childPath = path + name
+            val descendants = files.filter {
+                it.relativeFolder.take(childPath.size) == childPath
+            }
+            val directFiles = descendants.count { it.relativeFolder == childPath }
+            val childFolderCount = descendants.mapNotNull {
+                if (it.relativeFolder.size > childPath.size) {
+                    it.relativeFolder[childPath.size]
+                } else {
+                    null
+                }
+            }.distinct().size
+
+            DocumentBrowserFolder(
+                name = name,
+                folderCount = childFolderCount,
+                fileCount = directFiles
+            )
+        }
+    }
+}
+
+private fun buildDocumentBrowser(documents: List<DocumentDto>): DocumentBrowser {
+    if (documents.isEmpty()) return DocumentBrowser(emptyList())
+
+    val folderParts = documents.map { document ->
+        document.filePath
+            .trim('/')
+            .substringBeforeLast('/', "")
+            .split('/')
+            .filter { it.isNotBlank() }
+    }
+
+    val commonPrefixLength = folderParts.minOfOrNull { it.size }?.let { maximum ->
+        (0 until maximum)
+            .takeWhile { index ->
+                folderParts.map { parts -> parts[index] }.distinct().size == 1
+            }
+            .count()
     } ?: 0
 
-    return documents.groupBy { document ->
-        val parts = document.filePath.trim('/').substringBeforeLast('/', "").split('/').filter { it.isNotBlank() }
-        val relative = parts.drop(commonCount)
-        if (relative.isEmpty()) "Projektordner" else relative.joinToString(" / ")
-    }.toSortedMap(String.CASE_INSENSITIVE_ORDER)
+    return DocumentBrowser(
+        documents.map { document ->
+            val parts = document.filePath
+                .trim('/')
+                .substringBeforeLast('/', "")
+                .split('/')
+                .filter { it.isNotBlank() }
+
+            DocumentBrowserFile(
+                document = document,
+                relativeFolder = parts.drop(commonPrefixLength)
+            )
+        }
+    )
 }
 
 @Composable
-private fun DocumentCard(document: DocumentDto, onOpen: () -> Unit) {
-    val icon = when {
-        document.mimeType == "application/pdf" ||
-            document.fileName.endsWith(".pdf", ignoreCase = true) -> Icons.Default.PictureAsPdf
-        document.mimeType.startsWith("image/") -> Icons.Default.Image
-        else -> Icons.Default.Description
-    }
+private fun DocumentBreadcrumb(
+    projectName: String,
+    currentPath: List<String>,
+    navigateTo: (Int) -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            TextButton(onClick = { navigateTo(0) }) {
+                Icon(Icons.Default.Home, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(5.dp))
+                Text(projectName, maxLines = 1)
+            }
 
-    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
+            currentPath.forEachIndexed { index, folder ->
+                Icon(
+                    Icons.Default.ChevronRight,
+                    null,
+                    Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                TextButton(onClick = { navigateTo(index + 1) }) {
+                    Text(folder, maxLines = 1)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DocumentFolderCard(
+    name: String,
+    folderCount: Int,
+    fileCount: Int,
+    onOpen: () -> Unit
+) {
+    Card(
+        onClick = onOpen,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp)
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.primaryContainer
+            ) {
+                Icon(
+                    Icons.Default.Folder,
+                    null,
+                    Modifier.padding(11.dp).size(28.dp),
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            }
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    name,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    buildString {
+                        append(fileCount)
+                        append(if (fileCount == 1) " Datei" else " Dateien")
+                        if (folderCount > 0) {
+                            append(" · ")
+                            append(folderCount)
+                            append(if (folderCount == 1) " Unterordner" else " Unterordner")
+                        }
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Icon(Icons.Default.ChevronRight, null)
+        }
+    }
+}
+
+@Composable
+private fun DocumentCard(
+    document: DocumentDto,
+    folderLabel: String? = null,
+    onOpen: () -> Unit
+) {
+    val icon = documentIcon(document)
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp)
+    ) {
         Column(
             Modifier.fillMaxWidth().padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -3362,13 +3649,13 @@ private fun DocumentCard(document: DocumentDto, onOpen: () -> Unit) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Surface(
                     shape = RoundedCornerShape(14.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer
+                    color = MaterialTheme.colorScheme.secondaryContainer
                 ) {
                     Icon(
                         icon,
                         null,
                         Modifier.padding(12.dp).size(28.dp),
-                        tint = MaterialTheme.colorScheme.onPrimaryContainer
+                        tint = MaterialTheme.colorScheme.onSecondaryContainer
                     )
                 }
                 Spacer(Modifier.width(12.dp))
@@ -3378,7 +3665,17 @@ private fun DocumentCard(document: DocumentDto, onOpen: () -> Unit) {
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
-                    Text(documentTypeLabel(document), style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        documentTypeLabel(document),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    folderLabel?.takeIf { it.isNotBlank() }?.let {
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
                 }
             }
 
@@ -3388,12 +3685,17 @@ private fun DocumentCard(document: DocumentDto, onOpen: () -> Unit) {
             ).filterNotNull().joinToString(" · ")
 
             if (details.isNotBlank()) {
-                Text(details, style = MaterialTheme.typography.bodySmall)
+                Text(
+                    details,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
 
             FilledTonalButton(
                 onClick = onOpen,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp)
             ) {
                 Icon(Icons.Default.OpenInNew, null)
                 Spacer(Modifier.width(8.dp))
@@ -3403,13 +3705,76 @@ private fun DocumentCard(document: DocumentDto, onOpen: () -> Unit) {
     }
 }
 
-private fun documentTypeLabel(document: DocumentDto): String = when {
-    document.mimeType == "application/pdf" ||
-        document.fileName.endsWith(".pdf", ignoreCase = true) -> "PDF"
-    document.mimeType.startsWith("image/") -> "Bild"
-    document.documentType == "photo" -> "Foto"
-    document.documentType == "scan" -> "Scan"
-    else -> document.documentType.ifBlank { "Dokument" }
+private fun documentIcon(document: DocumentDto): ImageVector {
+    val name = document.fileName.lowercase()
+    return when {
+        document.mimeType == "application/pdf" || name.endsWith(".pdf") ->
+            Icons.Default.PictureAsPdf
+        document.mimeType.startsWith("image/") ||
+            name.endsWith(".jpg") ||
+            name.endsWith(".jpeg") ||
+            name.endsWith(".png") ||
+            name.endsWith(".webp") ->
+            Icons.Default.Image
+        name.endsWith(".zip") ||
+            name.endsWith(".rar") ||
+            name.endsWith(".7z") ->
+            Icons.Default.FolderZip
+        name.endsWith(".xls") ||
+            name.endsWith(".xlsx") ||
+            name.endsWith(".ods") ->
+            Icons.Default.TableChart
+        name.endsWith(".doc") ||
+            name.endsWith(".docx") ||
+            name.endsWith(".odt") ->
+            Icons.Default.Article
+        name.endsWith(".dwg") ||
+            name.endsWith(".dxf") ->
+            Icons.Default.Architecture
+        else -> Icons.Default.Description
+    }
+}
+
+private fun openDocumentInNextcloud(
+    context: android.content.Context,
+    server: String,
+    document: DocumentDto
+) {
+    val cleanServer = server.trim().trimEnd('/')
+    val directory = document.filePath
+        .substringBeforeLast('/', "")
+        .let { if (it.startsWith("/")) it else "/$it" }
+
+    val target = buildString {
+        append(cleanServer)
+        append("/index.php/apps/files/?dir=")
+        append(Uri.encode(directory))
+        if (document.fileName.isNotBlank()) {
+            append("&scrollto=")
+            append(Uri.encode(document.fileName))
+        }
+    }
+
+    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(target)))
+}
+
+private fun documentTypeLabel(document: DocumentDto): String {
+    val name = document.fileName.lowercase()
+    return when {
+        document.mimeType == "application/pdf" || name.endsWith(".pdf") -> "PDF"
+        document.mimeType.startsWith("image/") -> "Bild"
+        name.endsWith(".doc") || name.endsWith(".docx") || name.endsWith(".odt") ->
+            "Textdokument"
+        name.endsWith(".xls") || name.endsWith(".xlsx") || name.endsWith(".ods") ->
+            "Tabelle"
+        name.endsWith(".zip") || name.endsWith(".rar") || name.endsWith(".7z") ->
+            "Archiv"
+        name.endsWith(".dwg") || name.endsWith(".dxf") ->
+            "CAD-Zeichnung"
+        document.documentType == "photo" -> "Foto"
+        document.documentType == "scan" -> "Scan"
+        else -> document.documentType.ifBlank { "Dokument" }
+    }
 }
 
 @Composable
@@ -3423,7 +3788,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
         Text("Mehr", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Text(login.displayName, fontWeight = FontWeight.Bold)
         Text(roleLabel(login.role))
-        Text("NextERP Mobile 2.0.1 · API v1")
+        Text("NextERP Mobile 2.1.0 · API v1")
         OutlinedButton(onClick = logout, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Logout, null); Spacer(Modifier.width(8.dp)); Text("Abmelden") }
     }
 }
