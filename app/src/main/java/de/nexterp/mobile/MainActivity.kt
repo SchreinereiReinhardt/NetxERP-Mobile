@@ -13,6 +13,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
@@ -1259,34 +1260,74 @@ private fun SplashScreen() {
 
 @Composable
 private fun LoginScreen(state: LoginState, vm: AppViewModel) {
-    Surface(Modifier.fillMaxSize()) {
+    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
-            modifier = Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()),
+            modifier = Modifier.fillMaxSize().padding(horizontal = 22.dp).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.Center
         ) {
-            Surface(shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.primaryContainer) {
-                Icon(Icons.Default.Handyman, null, Modifier.padding(18.dp).size(44.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(
+                    shape = RoundedCornerShape(22.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    shadowElevation = 6.dp
+                ) {
+                    Icon(
+                        Icons.Default.Handyman,
+                        null,
+                        Modifier.padding(16.dp).size(38.dp),
+                        tint = MaterialTheme.colorScheme.onPrimary
+                    )
+                }
+                Spacer(Modifier.width(14.dp))
+                Column {
+                    Text("NextERP", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.ExtraBold)
+                    Text("Mobile", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+                }
             }
-            Spacer(Modifier.height(20.dp))
-            Text("NextERP Mobile", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
-            Text("Deine Baustelle. Genau jetzt.", style = MaterialTheme.typography.bodyLarge)
+            Spacer(Modifier.height(22.dp))
+            Text("Deine Baustelle.\nGenau jetzt.", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Projekte, Zeiten, Material und Rapporte – ohne Umwege.",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             Spacer(Modifier.height(28.dp))
-            OutlinedTextField(state.server, vm::updateServer, label = { Text("Nextcloud-Server") }, leadingIcon = { Icon(Icons.Default.Cloud, null) }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.height(12.dp))
-            OutlinedTextField(state.username, vm::updateUsername, label = { Text("Benutzer") }, leadingIcon = { Icon(Icons.Default.Person, null) }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.height(12.dp))
-            OutlinedTextField(state.password, vm::updatePassword, label = { Text("Passwort oder App-Passwort") }, leadingIcon = { Icon(Icons.Default.Lock, null) }, visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth())
-            state.error?.let { Spacer(Modifier.height(12.dp)); Text(it, color = MaterialTheme.colorScheme.error) }
-            Spacer(Modifier.height(20.dp))
-            Button(onClick = vm::login, enabled = !state.loading, modifier = Modifier.fillMaxWidth().height(58.dp), shape = RoundedCornerShape(18.dp)) {
-                if (state.loading) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
-                else { Icon(Icons.Default.Login, null); Spacer(Modifier.width(8.dp)); Text("Anmelden", fontWeight = FontWeight.SemiBold) }
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(28.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedTextField(state.server, vm::updateServer, label = { Text("Nextcloud-Server") }, leadingIcon = { Icon(Icons.Default.Cloud, null) }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp))
+                    OutlinedTextField(state.username, vm::updateUsername, label = { Text("Benutzer") }, leadingIcon = { Icon(Icons.Default.Person, null) }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp))
+                    OutlinedTextField(state.password, vm::updatePassword, label = { Text("Passwort oder App-Passwort") }, leadingIcon = { Icon(Icons.Default.Lock, null) }, visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp))
+                    state.error?.let {
+                        Surface(color = MaterialTheme.colorScheme.errorContainer, shape = RoundedCornerShape(14.dp)) {
+                            Text(it, color = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.padding(12.dp))
+                        }
+                    }
+                    Button(onClick = vm::login, enabled = !state.loading, modifier = Modifier.fillMaxWidth().height(58.dp), shape = RoundedCornerShape(18.dp)) {
+                        if (state.loading) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+                        else {
+                            Icon(Icons.Default.Login, null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Anmelden", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
             }
-            Spacer(Modifier.height(10.dp))
-            Text("Anmeldung direkt an der NextERP Mobile API v1. Keine Testdaten.", style = MaterialTheme.typography.bodySmall)
+            Spacer(Modifier.height(14.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Security, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(6.dp))
+                Text("Direkte, verschlüsselte Verbindung zu NextERP", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
     }
 }
+
 
 @Composable
 private fun AppShell(vm: AppViewModel) {
@@ -1340,29 +1381,49 @@ private fun AppHeader(name: String, role: String, screen: Screen, onRefresh: () 
     val title = when (screen) {
         Screen.TODAY -> "Heute"; Screen.PROJECTS -> "Projekte"; Screen.PROJECT -> "Projekt"; Screen.TIME_ENTRY -> "Zeiten"; Screen.REPORT -> "Rapport"; Screen.PHOTOS -> "Fotos"; Screen.SCANNER -> "Scanner"; Screen.MATERIAL -> "Material"; Screen.DOCUMENTS -> "Dokumente"; Screen.MORE -> "Mehr"
     }
-    Surface(tonalElevation = 2.dp) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text(listOf(name, roleLabel(role)).filter { it.isNotBlank() }.joinToString(" · "), style = MaterialTheme.typography.bodySmall)
+    Surface(color = MaterialTheme.colorScheme.surface, shadowElevation = 1.dp) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Surface(shape = RoundedCornerShape(15.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                Icon(Icons.Default.Handyman, null, Modifier.padding(10.dp).size(24.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
             }
-            IconButton(onClick = onRefresh) { Icon(Icons.Default.Refresh, "Aktualisieren") }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
+                Text(listOf(name, roleLabel(role)).filter { it.isNotBlank() }.joinToString(" · "), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            FilledTonalIconButton(onClick = onRefresh) { Icon(Icons.Default.Refresh, "Aktualisieren") }
+            Spacer(Modifier.width(6.dp))
             IconButton(onClick = onLogout) { Icon(Icons.Default.Logout, "Abmelden") }
         }
     }
 }
 
+
 @Composable
 private fun AppBottomBar(selected: Screen, navigate: (Screen) -> Unit) {
     val items = listOf(
-        Triple(Screen.TODAY, Icons.Default.Home, "Heute"), Triple(Screen.PROJECTS, Icons.Default.Folder, "Projekte"), Triple(Screen.SCANNER, Icons.Default.QrCodeScanner, "Scanner"), Triple(Screen.MATERIAL, Icons.Default.Inventory2, "Material"), Triple(Screen.DOCUMENTS, Icons.Default.Description, "Dokumente"), Triple(Screen.MORE, Icons.Default.MoreHoriz, "Mehr")
+        Triple(Screen.TODAY, Icons.Default.Home, "Heute"),
+        Triple(Screen.PROJECTS, Icons.Default.Folder, "Projekte"),
+        Triple(Screen.SCANNER, Icons.Default.QrCodeScanner, "Scanner"),
+        Triple(Screen.MATERIAL, Icons.Default.Inventory2, "Material"),
+        Triple(Screen.DOCUMENTS, Icons.Default.Description, "Dokumente"),
+        Triple(Screen.MORE, Icons.Default.MoreHoriz, "Mehr")
     )
-    NavigationBar {
+    NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 5.dp) {
         items.forEach { (screen, icon, label) ->
-            NavigationBarItem(selected = selected == screen || (selected == Screen.PROJECT && screen == Screen.PROJECTS), onClick = { navigate(screen) }, icon = { Icon(icon, label) }, label = { Text(label) })
+            val isSelected = selected == screen ||
+                (screen == Screen.PROJECTS && selected in listOf(Screen.PROJECT, Screen.PHOTOS, Screen.REPORT, Screen.TIME_ENTRY))
+            NavigationBarItem(
+                selected = isSelected,
+                onClick = { navigate(screen) },
+                icon = { Icon(icon, label) },
+                label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                colors = NavigationBarItemDefaults.colors(indicatorColor = MaterialTheme.colorScheme.primaryContainer)
+            )
         }
     }
 }
+
 
 @Composable
 private fun TodayScreen(state: DataState, openProject: (ProjectDto) -> Unit, refresh: () -> Unit) {
@@ -1373,9 +1434,26 @@ private fun TodayScreen(state: DataState, openProject: (ProjectDto) -> Unit, ref
             state.dashboard == null -> EmptyState("Noch keine Dashboard-Daten")
             else -> {
                 val data = state.dashboard
-                Text("Heute", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(28.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primary)
+                ) {
+                    Row(Modifier.fillMaxWidth().padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Guten Morgen", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.78f))
+                            Text("Alles für heute.", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.onPrimary)
+                            Spacer(Modifier.height(8.dp))
+                            Text("${data.projectsToday} Projekte · ${data.reportsOpen} offene Rapporte", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.88f))
+                        }
+                        Surface(shape = RoundedCornerShape(22.dp), color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.12f)) {
+                            Icon(Icons.Default.Construction, null, Modifier.padding(16.dp).size(36.dp), tint = MaterialTheme.colorScheme.onPrimary)
+                        }
+                    }
+                }
+                Text("Überblick", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
                 MetricGrid(data)
-                Text("Aktuelle Projekte", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text("Aktuelle Projekte", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
                 if (data.recentProjects.isEmpty()) EmptyState("Keine aktiven Projekte gefunden.")
                 else data.recentProjects.take(4).forEach { project -> ProjectCard(project) { openProject(project) } }
             }
@@ -1400,15 +1478,23 @@ private fun MetricGrid(data: DashboardData) {
 
 @Composable
 private fun MetricCard(title: String, value: String, icon: ImageVector, modifier: Modifier) {
-    Card(modifier = modifier, shape = RoundedCornerShape(22.dp)) {
+    Card(
+        modifier = modifier,
+        shape = RoundedCornerShape(22.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+    ) {
         Column(Modifier.padding(16.dp)) {
-            Icon(icon, null, tint = MaterialTheme.colorScheme.primary)
+            Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                Icon(icon, null, Modifier.padding(9.dp).size(22.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
+            }
             Spacer(Modifier.height(12.dp))
-            Text(value, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-            Text(title, style = MaterialTheme.typography.bodySmall)
+            Text(value, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold)
+            Text(title, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
+
 
 @Composable
 private fun ProjectsScreen(state: DataState, openProject: (ProjectDto) -> Unit, refresh: () -> Unit) {
@@ -1688,25 +1774,64 @@ private fun TimeEntryScreen(
 
 @Composable
 private fun ProjectCard(project: ProjectDto, onClick: () -> Unit) {
-    Card(onClick = onClick, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp)) {
-        Column(Modifier.fillMaxWidth().padding(18.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(10.dp))
-                Icon(Icons.Default.Folder, null, tint = parseColor(project.color))
-                Spacer(Modifier.width(10.dp))
-                Text(project.projectName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+    val accent = parseColor(project.color)
+    Card(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+    ) {
+        Row(Modifier.fillMaxWidth()) {
+            Box(Modifier.width(6.dp).heightIn(min = 168.dp).background(accent))
+            Column(Modifier.weight(1f).padding(16.dp)) {
+                Row(verticalAlignment = Alignment.Top) {
+                    Surface(shape = RoundedCornerShape(14.dp), color = accent.copy(alpha = 0.13f)) {
+                        Icon(Icons.Default.Folder, null, Modifier.padding(9.dp).size(22.dp), tint = accent)
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(project.projectName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+                        if (project.projectNo.isNotBlank()) Text(project.projectNo, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Spacer(Modifier.height(12.dp))
+                if (project.customer.isNotBlank()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Person, null, Modifier.size(17.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.width(7.dp))
+                        Text(project.customer, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+                if (project.address.isNotBlank()) {
+                    Spacer(Modifier.height(6.dp))
+                    Row(verticalAlignment = Alignment.Top) {
+                        Icon(Icons.Default.LocationOn, null, Modifier.size(17.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.width(7.dp))
+                        Text(project.address, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                Spacer(Modifier.height(14.dp))
+                LinearProgressIndicator(
+                    progress = { project.progress.coerceIn(0, 100) / 100f },
+                    modifier = Modifier.fillMaxWidth().height(6.dp),
+                    color = accent,
+                    trackColor = accent.copy(alpha = 0.13f)
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Surface(shape = RoundedCornerShape(50), color = accent.copy(alpha = 0.13f)) {
+                        Text(project.status, Modifier.padding(horizontal = 11.dp, vertical = 6.dp), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = accent)
+                    }
+                    Spacer(Modifier.weight(1f))
+                    Text("${project.progress} %", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
-            if (project.projectNo.isNotBlank()) Text(project.projectNo, style = MaterialTheme.typography.labelSmall)
-            if (project.customer.isNotBlank()) Text(project.customer)
-            if (project.address.isNotBlank()) Text(project.address, style = MaterialTheme.typography.bodySmall)
-            Spacer(Modifier.height(8.dp))
-            LinearProgressIndicator(progress = { project.progress.coerceIn(0, 100) / 100f }, modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.height(8.dp))
-            AssistChip(onClick = {}, label = { Text(project.status) })
-            Text("Tippen für Navigation, Arbeitszeit und Material", style = MaterialTheme.typography.labelSmall)
         }
     }
 }
+
 
 @Composable
 private fun ReportScreen(
@@ -2186,13 +2311,30 @@ private fun MaterialCard(material: MaterialDto) {
 
 @Composable
 private fun ScreenColumn(content: @Composable ColumnScope.() -> Unit) {
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp), content = content)
+    Column(
+        modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+        content = content
+    )
 }
 
 @Composable
 private fun PrimaryAction(label: String, icon: ImageVector, onClick: () -> Unit) {
-    FilledTonalButton(onClick = onClick, modifier = Modifier.fillMaxWidth().height(56.dp), shape = RoundedCornerShape(18.dp)) { Icon(icon, null); Spacer(Modifier.width(10.dp)); Text(label, fontWeight = FontWeight.SemiBold) }
+    FilledTonalButton(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth().height(58.dp),
+        shape = RoundedCornerShape(18.dp),
+        contentPadding = PaddingValues(horizontal = 16.dp)
+    ) {
+        Surface(shape = RoundedCornerShape(11.dp), color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)) {
+            Icon(icon, null, Modifier.padding(7.dp).size(20.dp), tint = MaterialTheme.colorScheme.primary)
+        }
+        Spacer(Modifier.width(12.dp))
+        Text(label, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+        Icon(Icons.Default.ChevronRight, null)
+    }
 }
+
 
 @Composable
 private fun LoadingState() { Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
@@ -2731,7 +2873,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
         Text("Mehr", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Text(login.displayName, fontWeight = FontWeight.Bold)
         Text(roleLabel(login.role))
-        Text("NextERP Mobile 1.7.0 · API v1")
+        Text("NextERP Mobile 1.8.0 · API v1")
         OutlinedButton(onClick = logout, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Logout, null); Spacer(Modifier.width(8.dp)); Text("Abmelden") }
     }
 }
