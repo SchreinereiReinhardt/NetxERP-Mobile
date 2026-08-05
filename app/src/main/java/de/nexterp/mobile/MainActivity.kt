@@ -57,7 +57,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
-enum class Screen { TODAY, PROJECTS, PROJECT, TIME_ENTRY, REPORT, PHOTOS, SCANNER, MATERIAL, DOCUMENTS, MORE }
+enum class Screen { TODAY, CUSTOMERS, CUSTOMER_FORM, PROJECTS, PROJECT_FORM, PROJECT, TIME_ENTRY, REPORT, PHOTOS, SCANNER, MATERIAL, DOCUMENTS, MORE }
 
 data class LoginState(
     val server: String = "https://cloud.kassel-net.de",
@@ -94,6 +94,47 @@ data class ProjectDto(
     val email: String,
     val color: String,
     val progress: Int
+)
+
+data class CustomerDto(
+    val id: Int,
+    val customerNo: String,
+    val name: String,
+    val contactName: String,
+    val phone: String,
+    val mobile: String,
+    val email: String,
+    val street: String,
+    val postalCode: String,
+    val city: String,
+    val country: String,
+    val notes: String
+)
+
+data class CustomerFormState(
+    val name: String = "",
+    val contactName: String = "",
+    val phone: String = "",
+    val mobile: String = "",
+    val email: String = "",
+    val street: String = "",
+    val postalCode: String = "",
+    val city: String = "",
+    val country: String = "Deutschland",
+    val notes: String = "",
+    val saving: Boolean = false,
+    val error: String? = null
+)
+
+data class ProjectFormState(
+    val customerId: Int? = null,
+    val title: String = "",
+    val status: String = "Anfrage",
+    val startDate: String = java.time.LocalDate.now().toString(),
+    val dueDate: String = "",
+    val description: String = "",
+    val saving: Boolean = false,
+    val error: String? = null
 )
 
 data class MaterialDto(
@@ -182,6 +223,9 @@ data class DataState(
     val loading: Boolean = false,
     val dashboard: DashboardData? = null,
     val projects: List<ProjectDto> = emptyList(),
+    val customers: List<CustomerDto> = emptyList(),
+    val customersLoading: Boolean = false,
+    val customersError: String? = null,
     val materials: List<MaterialDto> = emptyList(),
     val materialsLoading: Boolean = false,
     val documents: List<DocumentDto> = emptyList(),
@@ -259,6 +303,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     var reportState by mutableStateOf(ReportState())
         private set
 
+    var customerFormState by mutableStateOf(CustomerFormState())
+        private set
+
+    var projectFormState by mutableStateOf(ProjectFormState())
+        private set
+
     init {
         viewModelScope.launch { restoreSession() }
     }
@@ -269,6 +319,94 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val bearerToken: String get() = accessToken
 
     fun navigate(target: Screen) { screen = target }
+
+    fun canManageMasterData(): Boolean =
+        loginState.role.lowercase() in setOf("administrator", "admin", "office", "manager")
+
+    fun openCustomers() {
+        screen = Screen.CUSTOMERS
+        loadCustomers()
+    }
+
+    fun loadCustomers() {
+        viewModelScope.launch {
+            dataState = dataState.copy(customersLoading = true, customersError = null)
+            val result = authorizedRequest { token -> NextErpApi.customers(loginState.server, token) }
+            dataState = if (result.isSuccess) {
+                dataState.copy(customers = result.getOrNull().orEmpty(), customersLoading = false, customersError = null)
+            } else {
+                dataState.copy(customersLoading = false, customersError = result.exceptionOrNull()?.message ?: "Kunden konnten nicht geladen werden.")
+            }
+        }
+    }
+
+    fun openCustomerForm() {
+        customerFormState = CustomerFormState()
+        screen = Screen.CUSTOMER_FORM
+    }
+
+    fun updateCustomerForm(transform: (CustomerFormState) -> CustomerFormState) {
+        customerFormState = transform(customerFormState).copy(error = null)
+    }
+
+    fun saveCustomer() {
+        if (!canManageMasterData()) {
+            customerFormState = customerFormState.copy(error = "Keine Berechtigung.")
+            return
+        }
+        if (customerFormState.name.isBlank()) {
+            customerFormState = customerFormState.copy(error = "Kundenname ist erforderlich.")
+            return
+        }
+        viewModelScope.launch {
+            customerFormState = customerFormState.copy(saving = true, error = null)
+            val result = authorizedRequest { token -> NextErpApi.createCustomer(loginState.server, token, customerFormState) }
+            if (result.isFailure) {
+                customerFormState = customerFormState.copy(saving = false, error = result.exceptionOrNull()?.message ?: "Kunde konnte nicht gespeichert werden.")
+                return@launch
+            }
+            customerFormState = CustomerFormState()
+            loadCustomers()
+            screen = Screen.CUSTOMERS
+        }
+    }
+
+    fun openProjectForm() {
+        projectFormState = ProjectFormState()
+        screen = Screen.PROJECT_FORM
+        if (dataState.customers.isEmpty()) loadCustomers()
+    }
+
+    fun updateProjectForm(transform: (ProjectFormState) -> ProjectFormState) {
+        projectFormState = transform(projectFormState).copy(error = null)
+    }
+
+    fun saveProject() {
+        val customerId = projectFormState.customerId
+        if (!canManageMasterData()) {
+            projectFormState = projectFormState.copy(error = "Keine Berechtigung.")
+            return
+        }
+        if (customerId == null || projectFormState.title.isBlank()) {
+            projectFormState = projectFormState.copy(error = "Kunde und Projektname sind erforderlich.")
+            return
+        }
+        viewModelScope.launch {
+            projectFormState = projectFormState.copy(saving = true, error = null)
+            val result = authorizedRequest { token ->
+                NextErpApi.createProject(loginState.server, token, customerId, projectFormState)
+            }
+            if (result.isFailure) {
+                projectFormState = projectFormState.copy(saving = false, error = result.exceptionOrNull()?.message ?: "Projekt konnte nicht gespeichert werden.")
+                return@launch
+            }
+            val project = result.getOrThrow()
+            projectFormState = ProjectFormState()
+            refresh()
+            dataState = dataState.copy(selectedProject = project)
+            screen = Screen.PROJECT
+        }
+    }
 
     fun openProject(project: ProjectDto) {
         dataState = dataState.copy(selectedProject = project)
@@ -954,6 +1092,44 @@ object NextErpApi {
         )
     }
 
+    suspend fun customers(server: String, token: String): Result<List<CustomerDto>> = runCatching {
+        when (val data = request(server, "/customers", token = token)) {
+            is JSONArray -> data.toCustomers()
+            is JSONObject -> data.optJSONArray("customers").toCustomers()
+            else -> emptyList()
+        }
+    }
+
+    suspend fun createCustomer(server: String, token: String, state: CustomerFormState): Result<CustomerDto> = runCatching {
+        val body = JSONObject()
+            .put("name", state.name.trim())
+            .put("contactName", state.contactName.trim())
+            .put("phone", state.phone.trim())
+            .put("mobile", state.mobile.trim())
+            .put("email", state.email.trim())
+            .put("street", state.street.trim())
+            .put("postalCode", state.postalCode.trim())
+            .put("city", state.city.trim())
+            .put("country", state.country.trim())
+            .put("notes", state.notes.trim())
+        val data = request(server, "/customers", "POST", token, body) as? JSONObject
+            ?: error("Ungültige Kunden-Antwort.")
+        data.toCustomer()
+    }
+
+    suspend fun createProject(server: String, token: String, customerId: Int, state: ProjectFormState): Result<ProjectDto> = runCatching {
+        val body = JSONObject()
+            .put("customerId", customerId)
+            .put("title", state.title.trim())
+            .put("status", state.status)
+            .put("startDate", state.startDate.trim())
+            .put("dueDate", state.dueDate.trim())
+            .put("description", state.description.trim())
+        val data = request(server, "/projects", "POST", token, body) as? JSONObject
+            ?: error("Ungültige Projekt-Antwort.")
+        data.toProject()
+    }
+
     suspend fun projects(server: String, token: String): Result<List<ProjectDto>> = runCatching {
         when (val data = request(server, "/projects", token = token)) {
             is org.json.JSONArray -> data.toProjects()
@@ -1224,6 +1400,28 @@ object NextErpApi {
         }
     }
 
+    private fun JSONObject.toCustomer(): CustomerDto = CustomerDto(
+        id = optInt("id"),
+        customerNo = optString("customerNo", optString("customer_no")),
+        name = optString("name"),
+        contactName = optString("contactName", optString("contact_name")),
+        phone = optString("phone"),
+        mobile = optString("mobile"),
+        email = optString("email"),
+        street = optString("street"),
+        postalCode = optString("postalCode", optString("postal_code")),
+        city = optString("city"),
+        country = optString("country"),
+        notes = optString("notes")
+    )
+
+    private fun JSONArray?.toCustomers(): List<CustomerDto> {
+        if (this == null) return emptyList()
+        return buildList {
+            for (i in 0 until length()) optJSONObject(i)?.let { add(it.toCustomer()) }
+        }
+    }
+
     private fun apiMessage(json: JSONObject, fallback: String): String {
         val message = json.optString("message")
         if (message.isNotBlank()) return message
@@ -1338,7 +1536,10 @@ private fun AppShell(vm: AppViewModel) {
         Box(Modifier.padding(padding)) {
             when (vm.screen) {
                 Screen.TODAY -> TodayScreen(vm.dataState, vm::openProject, vm::refresh)
-                Screen.PROJECTS -> ProjectsScreen(vm.dataState, vm::openProject, vm::refresh)
+                Screen.CUSTOMERS -> CustomersScreen(vm.dataState, vm.canManageMasterData(), vm::openCustomerForm, vm::loadCustomers)
+                Screen.CUSTOMER_FORM -> CustomerFormScreen(vm.customerFormState, vm)
+                Screen.PROJECTS -> ProjectsScreen(vm.dataState, vm.canManageMasterData(), vm::openProjectForm, vm::openProject, vm::refresh)
+                Screen.PROJECT_FORM -> ProjectFormScreen(vm.projectFormState, vm.dataState.customers, vm)
                 Screen.PROJECT -> ProjectScreen(
                     project = vm.dataState.selectedProject,
                     openTimeEntry = vm::openTimeEntry,
@@ -1379,7 +1580,7 @@ private fun AppShell(vm: AppViewModel) {
 @Composable
 private fun AppHeader(name: String, role: String, screen: Screen, onRefresh: () -> Unit, onLogout: () -> Unit) {
     val title = when (screen) {
-        Screen.TODAY -> "Heute"; Screen.PROJECTS -> "Projekte"; Screen.PROJECT -> "Projekt"; Screen.TIME_ENTRY -> "Zeiten"; Screen.REPORT -> "Rapport"; Screen.PHOTOS -> "Fotos"; Screen.SCANNER -> "Scanner"; Screen.MATERIAL -> "Material"; Screen.DOCUMENTS -> "Dokumente"; Screen.MORE -> "Mehr"
+        Screen.TODAY -> "Heute"; Screen.CUSTOMERS -> "Kunden"; Screen.CUSTOMER_FORM -> "Neuer Kunde"; Screen.PROJECTS -> "Projekte"; Screen.PROJECT_FORM -> "Neues Projekt"; Screen.PROJECT -> "Projekt"; Screen.TIME_ENTRY -> "Zeiten"; Screen.REPORT -> "Rapport"; Screen.PHOTOS -> "Fotos"; Screen.SCANNER -> "Scanner"; Screen.MATERIAL -> "Material"; Screen.DOCUMENTS -> "Dokumente"; Screen.MORE -> "Mehr"
     }
     Surface(color = MaterialTheme.colorScheme.surface, shadowElevation = 1.dp) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1404,6 +1605,7 @@ private fun AppBottomBar(selected: Screen, navigate: (Screen) -> Unit) {
     val items = listOf(
         Triple(Screen.TODAY, Icons.Default.Home, "Heute"),
         Triple(Screen.PROJECTS, Icons.Default.Folder, "Projekte"),
+        Triple(Screen.CUSTOMERS, Icons.Default.Groups, "Kunden"),
         Triple(Screen.SCANNER, Icons.Default.QrCodeScanner, "Scanner"),
         Triple(Screen.MATERIAL, Icons.Default.Inventory2, "Material"),
         Triple(Screen.DOCUMENTS, Icons.Default.Description, "Dokumente"),
@@ -1412,7 +1614,8 @@ private fun AppBottomBar(selected: Screen, navigate: (Screen) -> Unit) {
     NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 5.dp) {
         items.forEach { (screen, icon, label) ->
             val isSelected = selected == screen ||
-                (screen == Screen.PROJECTS && selected in listOf(Screen.PROJECT, Screen.PHOTOS, Screen.REPORT, Screen.TIME_ENTRY))
+                (screen == Screen.PROJECTS && selected in listOf(Screen.PROJECT_FORM, Screen.PROJECT, Screen.PHOTOS, Screen.REPORT, Screen.TIME_ENTRY)) ||
+                (screen == Screen.CUSTOMERS && selected == Screen.CUSTOMER_FORM)
             NavigationBarItem(
                 selected = isSelected,
                 onClick = { navigate(screen) },
@@ -1497,14 +1700,169 @@ private fun MetricCard(title: String, value: String, icon: ImageVector, modifier
 
 
 @Composable
-private fun ProjectsScreen(state: DataState, openProject: (ProjectDto) -> Unit, refresh: () -> Unit) {
+private fun ProjectsScreen(
+    state: DataState,
+    canCreate: Boolean,
+    openCreate: () -> Unit,
+    openProject: (ProjectDto) -> Unit,
+    refresh: () -> Unit
+) {
     ScreenColumn {
-        Text("Aktuelle Projekte", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Aktuelle Projekte", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            IconButton(onClick = refresh) { Icon(Icons.Default.Refresh, "Aktualisieren") }
+        }
+        if (canCreate) {
+            Button(onClick = openCreate, modifier = Modifier.fillMaxWidth().height(56.dp), shape = RoundedCornerShape(18.dp)) {
+                Icon(Icons.Default.AddBusiness, null)
+                Spacer(Modifier.width(8.dp))
+                Text("Neues Projekt", fontWeight = FontWeight.Bold)
+            }
+        }
         when {
             state.loading -> LoadingState()
             state.error != null -> ErrorState(state.error, refresh)
             state.projects.isEmpty() -> EmptyState("Keine aktiven Projekte im NextERP gefunden.")
             else -> state.projects.forEach { project -> ProjectCard(project) { openProject(project) } }
+        }
+    }
+}
+
+@Composable
+private fun CustomersScreen(
+    state: DataState,
+    canCreate: Boolean,
+    openCreate: () -> Unit,
+    refresh: () -> Unit
+) {
+    var search by remember { mutableStateOf("") }
+    val filtered = state.customers.filter {
+        search.isBlank() || it.name.contains(search, true) || it.customerNo.contains(search, true) || it.city.contains(search, true)
+    }
+
+    LaunchedEffect(Unit) { refresh() }
+
+    ScreenColumn {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Kunden", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            IconButton(onClick = refresh) { Icon(Icons.Default.Refresh, "Aktualisieren") }
+        }
+        if (canCreate) {
+            Button(onClick = openCreate, modifier = Modifier.fillMaxWidth().height(56.dp), shape = RoundedCornerShape(18.dp)) {
+                Icon(Icons.Default.PersonAdd, null)
+                Spacer(Modifier.width(8.dp))
+                Text("Neuen Kunden anlegen", fontWeight = FontWeight.Bold)
+            }
+        }
+        OutlinedTextField(search, { search = it }, label = { Text("Kunden suchen") }, leadingIcon = { Icon(Icons.Default.Search, null) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+        when {
+            state.customersLoading -> LoadingState()
+            state.customersError != null -> ErrorState(state.customersError, refresh)
+            filtered.isEmpty() -> EmptyState("Keine Kunden gefunden.")
+            else -> filtered.forEach { customer ->
+                Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
+                    Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                            Icon(Icons.Default.Person, null, Modifier.padding(10.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(customer.name, fontWeight = FontWeight.Bold)
+                            Text(listOf(customer.customerNo, customer.city).filter { it.isNotBlank() }.joinToString(" · "), style = MaterialTheme.typography.bodySmall)
+                            val phone = customer.mobile.ifBlank { customer.phone }
+                            if (phone.isNotBlank()) Text(phone, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CustomerFormScreen(state: CustomerFormState, vm: AppViewModel) {
+    ScreenColumn {
+        Text("Neuen Kunden anlegen", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
+            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(state.name, { value -> vm.updateCustomerForm { it.copy(name = value) } }, label = { Text("Kundenname *") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(state.contactName, { value -> vm.updateCustomerForm { it.copy(contactName = value) } }, label = { Text("Ansprechpartner") }, modifier = Modifier.fillMaxWidth())
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(state.phone, { value -> vm.updateCustomerForm { it.copy(phone = value) } }, label = { Text("Telefon") }, modifier = Modifier.weight(1f))
+                    OutlinedTextField(state.mobile, { value -> vm.updateCustomerForm { it.copy(mobile = value) } }, label = { Text("Mobil") }, modifier = Modifier.weight(1f))
+                }
+                OutlinedTextField(state.email, { value -> vm.updateCustomerForm { it.copy(email = value) } }, label = { Text("E-Mail") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(state.street, { value -> vm.updateCustomerForm { it.copy(street = value) } }, label = { Text("Straße") }, modifier = Modifier.fillMaxWidth())
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(state.postalCode, { value -> vm.updateCustomerForm { it.copy(postalCode = value) } }, label = { Text("PLZ") }, modifier = Modifier.weight(0.4f))
+                    OutlinedTextField(state.city, { value -> vm.updateCustomerForm { it.copy(city = value) } }, label = { Text("Ort") }, modifier = Modifier.weight(0.6f))
+                }
+                OutlinedTextField(state.country, { value -> vm.updateCustomerForm { it.copy(country = value) } }, label = { Text("Land") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(state.notes, { value -> vm.updateCustomerForm { it.copy(notes = value) } }, label = { Text("Notizen") }, minLines = 3, modifier = Modifier.fillMaxWidth())
+                state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                Button(onClick = vm::saveCustomer, enabled = !state.saving, modifier = Modifier.fillMaxWidth().height(58.dp)) {
+                    if (state.saving) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+                    else {
+                        Icon(Icons.Default.Save, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Kunde speichern", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProjectFormScreen(state: ProjectFormState, customers: List<CustomerDto>, vm: AppViewModel) {
+    val statuses = listOf("Anfrage", "Angebot", "Auftrag", "Fertigung", "Montage", "Abnahme", "Abrechnung", "Abgeschlossen")
+    ScreenColumn {
+        Text("Neues Projekt", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
+            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Kunde auswählen", fontWeight = FontWeight.Bold)
+                if (customers.isEmpty()) {
+                    Text("Keine Kunden vorhanden. Bitte zuerst einen Kunden anlegen.", color = MaterialTheme.colorScheme.error)
+                } else {
+                    customers.forEach { customer ->
+                        FilterChip(
+                            selected = state.customerId == customer.id,
+                            onClick = { vm.updateProjectForm { it.copy(customerId = customer.id) } },
+                            label = { Text(customer.name) },
+                            leadingIcon = if (state.customerId == customer.id) ({ Icon(Icons.Default.Check, null) }) else null,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+                OutlinedTextField(state.title, { value -> vm.updateProjectForm { it.copy(title = value) } }, label = { Text("Projektname *") }, modifier = Modifier.fillMaxWidth())
+                Text("Status", fontWeight = FontWeight.Bold)
+                statuses.chunked(2).forEach { row ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        row.forEach { status ->
+                            FilterChip(
+                                selected = state.status == status,
+                                onClick = { vm.updateProjectForm { it.copy(status = status) } },
+                                label = { Text(status) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(state.startDate, { value -> vm.updateProjectForm { it.copy(startDate = value) } }, label = { Text("Startdatum") }, modifier = Modifier.weight(1f))
+                    OutlinedTextField(state.dueDate, { value -> vm.updateProjectForm { it.copy(dueDate = value) } }, label = { Text("Fertig bis") }, modifier = Modifier.weight(1f))
+                }
+                OutlinedTextField(state.description, { value -> vm.updateProjectForm { it.copy(description = value) } }, label = { Text("Beschreibung") }, minLines = 4, modifier = Modifier.fillMaxWidth())
+                state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                Button(onClick = vm::saveProject, enabled = !state.saving && state.customerId != null, modifier = Modifier.fillMaxWidth().height(58.dp)) {
+                    if (state.saving) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+                    else {
+                        Icon(Icons.Default.Save, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Projekt anlegen", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
         }
     }
 }
@@ -2873,7 +3231,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
         Text("Mehr", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Text(login.displayName, fontWeight = FontWeight.Bold)
         Text(roleLabel(login.role))
-        Text("NextERP Mobile 1.8.0 · API v1")
+        Text("NextERP Mobile 1.9.0 · API v1")
         OutlinedButton(onClick = logout, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Logout, null); Spacer(Modifier.width(8.dp)); Text("Abmelden") }
     }
 }
