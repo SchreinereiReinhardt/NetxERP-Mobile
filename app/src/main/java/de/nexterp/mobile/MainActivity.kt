@@ -13,6 +13,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.clickable
@@ -1728,17 +1731,68 @@ fun NextERPApp(vm: AppViewModel = viewModel()) {
 
 @Composable
 private fun SplashScreen() {
-    Surface(Modifier.fillMaxSize()) {
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = Color(0xFF063B70)
+    ) {
         Column(
-            Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 28.dp, vertical = 36.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            Icon(Icons.Default.Handyman, null, Modifier.size(64.dp), tint = MaterialTheme.colorScheme.primary)
-            Spacer(Modifier.height(18.dp))
-            Text("NextERP Mobile", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(20.dp))
-            CircularProgressIndicator()
+            Image(
+                painter = painterResource(id = R.mipmap.ic_launcher),
+                contentDescription = "NextERP",
+                modifier = Modifier.size(132.dp)
+            )
+            Spacer(Modifier.height(22.dp))
+            Text(
+                "NextERP",
+                style = MaterialTheme.typography.headlineLarge,
+                fontWeight = FontWeight.ExtraBold,
+                color = Color.White
+            )
+            Text(
+                "ERP für das Handwerk",
+                style = MaterialTheme.typography.titleMedium,
+                color = Color.White.copy(alpha = 0.90f)
+            )
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "Handwerk. Einfach. Digital.",
+                style = MaterialTheme.typography.bodyLarge,
+                color = Color(0xFFA7CD58),
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(30.dp))
+            CircularProgressIndicator(
+                color = Color(0xFFA7CD58),
+                trackColor = Color.White.copy(alpha = 0.18f)
+            )
+            Spacer(Modifier.height(42.dp))
+            Text(
+                "Entwickelt von",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.White.copy(alpha = 0.70f)
+            )
+            Text(
+                "André Reinhardt",
+                style = MaterialTheme.typography.titleMedium,
+                color = Color(0xFFA7CD58),
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                "Schreinerei Reinhardt",
+                style = MaterialTheme.typography.bodyMedium,
+                color = Color.White
+            )
+            Text(
+                "www.schreinerei-reinhardt.de",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.White.copy(alpha = 0.78f)
+            )
         }
     }
 }
@@ -1751,29 +1805,35 @@ private fun LoginScreen(state: LoginState, vm: AppViewModel) {
             verticalArrangement = Arrangement.Center
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Surface(
-                    shape = RoundedCornerShape(22.dp),
-                    color = MaterialTheme.colorScheme.primary,
-                    shadowElevation = 6.dp
-                ) {
-                    Icon(
-                        Icons.Default.Handyman,
-                        null,
-                        Modifier.padding(16.dp).size(38.dp),
-                        tint = MaterialTheme.colorScheme.onPrimary
-                    )
-                }
-                Spacer(Modifier.width(14.dp))
+                Image(
+                    painter = painterResource(id = R.mipmap.ic_launcher),
+                    contentDescription = "NextERP",
+                    modifier = Modifier.size(82.dp)
+                )
+                Spacer(Modifier.width(16.dp))
                 Column {
-                    Text("NextERP", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.ExtraBold)
-                    Text("Mobile", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "NextERP",
+                        style = MaterialTheme.typography.headlineLarge,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                    Text(
+                        "ERP für das Handwerk",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold
+                    )
                 }
             }
             Spacer(Modifier.height(22.dp))
-            Text("Deine Baustelle.\nGenau jetzt.", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Text(
+                "Handwerk. Einfach. Digital.",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold
+            )
             Spacer(Modifier.height(8.dp))
             Text(
-                "Projekte, Zeiten, Material und Rapporte – ohne Umwege.",
+                "Projekte, Zeiten, Material, Dokumente und Rapporte – direkt mit deiner Nextcloud.",
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -1804,11 +1864,39 @@ private fun LoginScreen(state: LoginState, vm: AppViewModel) {
                 }
             }
             Spacer(Modifier.height(14.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.Security, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Default.Security,
+                    null,
+                    Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
                 Spacer(Modifier.width(6.dp))
-                Text("Direkte, verschlüsselte Verbindung zu NextERP", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    "Direkte, verschlüsselte Verbindung zu NextERP",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "Entwickelt von André Reinhardt · Schreinerei Reinhardt",
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                "www.schreinerei-reinhardt.de",
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary
+            )
         }
     }
 }
@@ -4255,12 +4343,134 @@ private fun PlaceholderScreen(title: String, subtitle: String, icon: ImageVector
 
 @Composable
 private fun MoreScreen(login: LoginState, logout: () -> Unit) {
+    val uriHandler = LocalUriHandler.current
+
     ScreenColumn {
-        Text("Mehr", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        Text(login.displayName, fontWeight = FontWeight.Bold)
-        Text(roleLabel(login.role))
-        Text("NextERP Mobile 2.2.0 · API v1")
-        OutlinedButton(onClick = logout, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Logout, null); Spacer(Modifier.width(8.dp)); Text("Abmelden") }
+        Text(
+            "Mehr",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold
+        )
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(26.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = Color(0xFF063B70)
+            )
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(22.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Image(
+                    painter = painterResource(id = R.mipmap.ic_launcher),
+                    contentDescription = "NextERP",
+                    modifier = Modifier.size(104.dp)
+                )
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    "NextERP",
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = Color.White
+                )
+                Text(
+                    "ERP für das Handwerk",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = Color.White.copy(alpha = 0.88f)
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Handwerk. Einfach. Digital.",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = Color(0xFFA7CD58),
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(16.dp))
+                AssistChip(
+                    onClick = {},
+                    label = { Text("Version 2.3.0 · API v1") },
+                    colors = AssistChipDefaults.assistChipColors(
+                        containerColor = Color.White.copy(alpha = 0.12f),
+                        labelColor = Color.White
+                    )
+                )
+            }
+        }
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(22.dp)
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    "Entwickler",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    "André Reinhardt",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Bold
+                )
+                Text("Schreinerei Reinhardt")
+                FilledTonalButton(
+                    onClick = {
+                        uriHandler.openUri("https://www.schreinerei-reinhardt.de")
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Icon(Icons.Default.Language, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("www.schreinerei-reinhardt.de")
+                }
+                HorizontalDivider()
+                Text(
+                    "Made with ♥ in Nordhessen",
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+        }
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(22.dp)
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text("Angemeldet als", style = MaterialTheme.typography.labelMedium)
+                Text(login.displayName, fontWeight = FontWeight.Bold)
+                Text(roleLabel(login.role))
+            }
+        }
+
+        OutlinedButton(
+            onClick = logout,
+            modifier = Modifier.fillMaxWidth().height(54.dp),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Icon(Icons.Default.Logout, null)
+            Spacer(Modifier.width(8.dp))
+            Text("Abmelden")
+        }
+
+        Text(
+            "© 2026 André Reinhardt · Schreinerei Reinhardt",
+            modifier = Modifier.fillMaxWidth(),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
