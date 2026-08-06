@@ -1919,6 +1919,7 @@ private fun AppShell(vm: AppViewModel) {
                     project = vm.dataState.selectedProject,
                     openTimeEntry = vm::openTimeEntry,
                     openReports = vm::openProjectReports,
+                    openMaterial = { vm.navigate(Screen.MATERIAL) },
                     openDocuments = {
                         vm.dataState.selectedProject?.let(vm::openProjectDocuments)
                     },
@@ -2263,6 +2264,7 @@ private fun ProjectScreen(
     project: ProjectDto?,
     openTimeEntry: () -> Unit,
     openReports: () -> Unit,
+    openMaterial: () -> Unit,
     openDocuments: () -> Unit,
     openPhotos: () -> Unit,
     openReport: () -> Unit
@@ -2280,7 +2282,7 @@ private fun ProjectScreen(
         if (project.phone.isNotBlank()) PrimaryAction("Anrufen", Icons.Default.Phone) { context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:${project.phone}"))) }
         if (project.email.isNotBlank()) PrimaryAction("E-Mail", Icons.Default.Email) { context.startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:${project.email}"))) }
         PrimaryAction("Arbeitszeit eintragen", Icons.Default.Schedule, openTimeEntry)
-        PrimaryAction("Material", Icons.Default.Inventory2) {}
+        PrimaryAction("Material", Icons.Default.Inventory2, openMaterial)
         PrimaryAction("Dokumente", Icons.Default.Description, openDocuments)
         PrimaryAction("Rapporte öffnen", Icons.Default.Assignment, openReports)
         PrimaryAction("Fotos", Icons.Default.PhotoCamera, openPhotos)
@@ -4390,7 +4392,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
                 Spacer(Modifier.height(16.dp))
                 AssistChip(
                     onClick = {},
-                    label = { Text("Version 2.3.1 · API v1") },
+                    label = { Text("Version 2.3.2 · API v1") },
                     colors = AssistChipDefaults.assistChipColors(
                         containerColor = Color.White.copy(alpha = 0.12f),
                         labelColor = Color.White

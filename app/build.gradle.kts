@@ -12,8 +12,8 @@ android {
         applicationId = "de.nexterp.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 27
-        versionName = "2.3.1"
+        versionCode = 28
+        versionName = "2.3.2"
     }
 
     buildFeatures { compose = true }
