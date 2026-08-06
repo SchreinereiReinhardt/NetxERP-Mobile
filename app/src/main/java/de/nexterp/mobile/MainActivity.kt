@@ -61,7 +61,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
-enum class Screen { TODAY, CUSTOMERS, CUSTOMER_FORM, PROJECTS, PROJECT_FORM, PROJECT, TIME_ENTRY, REPORT, PHOTOS, SCANNER, MATERIAL, DOCUMENTS, MORE }
+enum class Screen { TODAY, CUSTOMERS, CUSTOMER_FORM, PROJECTS, PROJECT_FORM, PROJECT, REPORTS, EXISTING_REPORT, TIME_ENTRY, REPORT, PHOTOS, SCANNER, MATERIAL, DOCUMENTS, MORE }
 
 data class LoginState(
     val server: String = "https://cloud.kassel-net.de",
@@ -223,6 +223,63 @@ data class ReportState(
     val error: String? = null
 )
 
+data class ExistingReportSummary(
+    val id: Int,
+    val reportNo: String,
+    val reportDate: String,
+    val title: String,
+    val status: String,
+    val signedBy: String,
+    val signedAt: String,
+    val locked: Boolean
+)
+
+data class ExistingReportHour(
+    val workDate: String,
+    val userId: String,
+    val hours: Double,
+    val activity: String
+)
+
+data class ExistingReportItem(
+    val description: String,
+    val quantity: Double,
+    val unit: String,
+    val notes: String
+)
+
+data class ExistingReportDetail(
+    val id: Int,
+    val projectId: Int,
+    val reportNo: String,
+    val reportDate: String,
+    val title: String,
+    val description: String,
+    val customerNote: String,
+    val status: String,
+    val signedBy: String,
+    val signedAt: String,
+    val technicianSignedBy: String,
+    val technicianSignedAt: String,
+    val hours: List<ExistingReportHour>,
+    val items: List<ExistingReportItem>,
+    val photoCount: Int
+)
+
+data class ExistingReportState(
+    val reports: List<ExistingReportSummary> = emptyList(),
+    val loading: Boolean = false,
+    val error: String? = null,
+    val selected: ExistingReportDetail? = null,
+    val detailLoading: Boolean = false,
+    val customerSignedBy: String = "",
+    val customerSignatureData: String = "",
+    val technicianSignedBy: String = "",
+    val technicianSignatureData: String = "",
+    val saving: Boolean = false,
+    val success: String? = null
+)
+
 data class DataState(
     val loading: Boolean = false,
     val dashboard: DashboardData? = null,
@@ -312,6 +369,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         private set
 
     var projectFormState by mutableStateOf(ProjectFormState())
+        private set
+
+    var existingReportState by mutableStateOf(ExistingReportState())
         private set
 
     init {
@@ -537,6 +597,121 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         ?: "Dokumente konnten nicht geladen werden."
                 )
             }
+        }
+    }
+
+    fun openProjectReports() {
+        val project = dataState.selectedProject ?: return
+        screen = Screen.REPORTS
+        loadProjectReports(project.id)
+    }
+
+    fun loadProjectReports(projectId: Int) {
+        viewModelScope.launch {
+            existingReportState = existingReportState.copy(loading = true, error = null)
+            val result = authorizedRequest { token ->
+                NextErpApi.projectReports(loginState.server, token, projectId)
+            }
+            existingReportState = if (result.isSuccess) {
+                existingReportState.copy(
+                    reports = result.getOrNull().orEmpty(),
+                    loading = false,
+                    error = null
+                )
+            } else {
+                existingReportState.copy(
+                    loading = false,
+                    error = result.exceptionOrNull()?.message ?: "Rapporte konnten nicht geladen werden."
+                )
+            }
+        }
+    }
+
+    fun openExistingReport(reportId: Int) {
+        screen = Screen.EXISTING_REPORT
+        viewModelScope.launch {
+            existingReportState = existingReportState.copy(
+                selected = null,
+                detailLoading = true,
+                error = null,
+                success = null,
+                customerSignedBy = "",
+                customerSignatureData = "",
+                technicianSignedBy = loginState.displayName.ifBlank { loginState.username },
+                technicianSignatureData = ""
+            )
+            val result = authorizedRequest { token ->
+                NextErpApi.reportDetail(loginState.server, token, reportId)
+            }
+            existingReportState = if (result.isSuccess) {
+                existingReportState.copy(
+                    selected = result.getOrThrow(),
+                    detailLoading = false,
+                    error = null
+                )
+            } else {
+                existingReportState.copy(
+                    detailLoading = false,
+                    error = result.exceptionOrNull()?.message ?: "Rapport konnte nicht geladen werden."
+                )
+            }
+        }
+    }
+
+    fun updateExistingCustomerName(value: String) {
+        existingReportState = existingReportState.copy(customerSignedBy = value, error = null, success = null)
+    }
+    fun updateExistingCustomerSignature(value: String) {
+        existingReportState = existingReportState.copy(customerSignatureData = value, error = null, success = null)
+    }
+    fun updateExistingTechnicianName(value: String) {
+        existingReportState = existingReportState.copy(technicianSignedBy = value, error = null, success = null)
+    }
+    fun updateExistingTechnicianSignature(value: String) {
+        existingReportState = existingReportState.copy(technicianSignatureData = value, error = null, success = null)
+    }
+
+    fun signExistingReport() {
+        val report = existingReportState.selected ?: return
+        if (existingReportState.customerSignedBy.isBlank() || existingReportState.customerSignatureData.isBlank()) {
+            existingReportState = existingReportState.copy(error = "Kundenname und Kundenunterschrift sind erforderlich.")
+            return
+        }
+        if (existingReportState.technicianSignedBy.isBlank() || existingReportState.technicianSignatureData.isBlank()) {
+            existingReportState = existingReportState.copy(error = "Monteur und Monteurunterschrift sind erforderlich.")
+            return
+        }
+        viewModelScope.launch {
+            existingReportState = existingReportState.copy(saving = true, error = null, success = null)
+            val result = authorizedRequest { token ->
+                NextErpApi.signExistingReport(
+                    loginState.server,
+                    token,
+                    report.id,
+                    existingReportState.customerSignedBy.trim(),
+                    existingReportState.customerSignatureData,
+                    existingReportState.technicianSignedBy.trim(),
+                    existingReportState.technicianSignatureData
+                )
+            }
+            if (result.isFailure) {
+                existingReportState = existingReportState.copy(
+                    saving = false,
+                    error = result.exceptionOrNull()?.message ?: "Rapport konnte nicht unterschrieben werden."
+                )
+                return@launch
+            }
+            val refreshed = authorizedRequest { token ->
+                NextErpApi.reportDetail(loginState.server, token, report.id)
+            }
+            existingReportState = existingReportState.copy(
+                selected = refreshed.getOrNull() ?: report.copy(status = "Unterschrieben"),
+                saving = false,
+                success = "Rapport wurde unterschrieben und das PDF neu erzeugt.",
+                customerSignatureData = "",
+                technicianSignatureData = ""
+            )
+            dataState.selectedProject?.let { loadProjectReports(it.id) }
         }
     }
 
@@ -1240,6 +1415,105 @@ object NextErpApi {
         }
     }
 
+    suspend fun projectReports(
+        server: String,
+        token: String,
+        projectId: Int
+    ): Result<List<ExistingReportSummary>> = runCatching {
+        val data = request(server, "/project/$projectId/reports", token = token)
+        val array = when (data) {
+            is JSONArray -> data
+            is JSONObject -> data.optJSONArray("reports")
+            else -> null
+        }
+        if (array == null) emptyList() else buildList {
+            for (i in 0 until array.length()) {
+                array.optJSONObject(i)?.let { row ->
+                    add(
+                        ExistingReportSummary(
+                            id = row.optInt("id"),
+                            reportNo = row.optString("reportNo"),
+                            reportDate = row.optString("reportDate"),
+                            title = row.optString("title"),
+                            status = row.optString("status"),
+                            signedBy = row.optString("signedBy"),
+                            signedAt = row.optString("signedAt"),
+                            locked = row.optBoolean("locked")
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    suspend fun reportDetail(
+        server: String,
+        token: String,
+        reportId: Int
+    ): Result<ExistingReportDetail> = runCatching {
+        val row = request(server, "/reports/$reportId", token = token) as? JSONObject
+            ?: error("Ungültige Rapport-Antwort.")
+        val hoursArray = row.optJSONArray("hours")
+        val itemsArray = row.optJSONArray("items")
+        ExistingReportDetail(
+            id = row.optInt("id"),
+            projectId = row.optInt("projectId"),
+            reportNo = row.optString("reportNo"),
+            reportDate = row.optString("reportDate"),
+            title = row.optString("title"),
+            description = row.optString("description"),
+            customerNote = row.optString("customerNote"),
+            status = row.optString("status"),
+            signedBy = row.optString("signedBy"),
+            signedAt = row.optString("signedAt"),
+            technicianSignedBy = row.optString("technicianSignedBy"),
+            technicianSignedAt = row.optString("technicianSignedAt"),
+            hours = buildList {
+                if (hoursArray != null) for (i in 0 until hoursArray.length()) {
+                    hoursArray.optJSONObject(i)?.let {
+                        add(ExistingReportHour(
+                            workDate = it.optString("workDate"),
+                            userId = it.optString("userId"),
+                            hours = it.optDouble("hours"),
+                            activity = it.optString("activity")
+                        ))
+                    }
+                }
+            },
+            items = buildList {
+                if (itemsArray != null) for (i in 0 until itemsArray.length()) {
+                    itemsArray.optJSONObject(i)?.let {
+                        add(ExistingReportItem(
+                            description = it.optString("description"),
+                            quantity = it.optDouble("quantity"),
+                            unit = it.optString("unit"),
+                            notes = it.optString("notes")
+                        ))
+                    }
+                }
+            },
+            photoCount = row.optInt("photoCount")
+        )
+    }
+
+    suspend fun signExistingReport(
+        server: String,
+        token: String,
+        reportId: Int,
+        customerSignedBy: String,
+        customerSignatureData: String,
+        technicianSignedBy: String,
+        technicianSignatureData: String
+    ): Result<JSONObject> = runCatching {
+        val body = JSONObject()
+            .put("customerSignedBy", customerSignedBy)
+            .put("customerSignatureData", customerSignatureData)
+            .put("technicianSignedBy", technicianSignedBy)
+            .put("technicianSignatureData", technicianSignatureData)
+        request(server, "/reports/$reportId/sign", "POST", token, body) as? JSONObject
+            ?: JSONObject()
+    }
+
     suspend fun projectDocuments(
         server: String,
         token: String,
@@ -1556,6 +1830,7 @@ private fun AppShell(vm: AppViewModel) {
                 Screen.PROJECT -> ProjectScreen(
                     project = vm.dataState.selectedProject,
                     openTimeEntry = vm::openTimeEntry,
+                    openReports = vm::openProjectReports,
                     openDocuments = {
                         vm.dataState.selectedProject?.let(vm::openProjectDocuments)
                     },
@@ -1565,6 +1840,13 @@ private fun AppShell(vm: AppViewModel) {
                     openReport = vm::openReport
                 )
                 Screen.TIME_ENTRY -> TimeEntryScreen(vm.dataState.selectedProject, vm.timeEntryState, vm.dataState.materials, vm.dataState.materialsLoading, vm)
+                Screen.REPORTS -> ProjectReportsScreen(
+                    project = vm.dataState.selectedProject,
+                    state = vm.existingReportState,
+                    openReport = vm::openExistingReport,
+                    refresh = { vm.dataState.selectedProject?.let { vm.loadProjectReports(it.id) } }
+                )
+                Screen.EXISTING_REPORT -> ExistingReportScreen(vm.existingReportState, vm)
                 Screen.REPORT -> ReportScreen(vm.dataState.selectedProject, vm.reportState, vm.dataState.materials, vm.dataState.materialsLoading, vm)
                 Screen.PHOTOS -> ProjectPhotosScreen(
                     state = vm.dataState,
@@ -1601,7 +1883,7 @@ private fun AppShell(vm: AppViewModel) {
 @Composable
 private fun AppHeader(name: String, role: String, screen: Screen, onRefresh: () -> Unit, onLogout: () -> Unit) {
     val title = when (screen) {
-        Screen.TODAY -> "Heute"; Screen.CUSTOMERS -> "Kunden"; Screen.CUSTOMER_FORM -> "Neuer Kunde"; Screen.PROJECTS -> "Projekte"; Screen.PROJECT_FORM -> "Neues Projekt"; Screen.PROJECT -> "Projekt"; Screen.TIME_ENTRY -> "Zeiten"; Screen.REPORT -> "Rapport"; Screen.PHOTOS -> "Fotos"; Screen.SCANNER -> "Scanner"; Screen.MATERIAL -> "Material"; Screen.DOCUMENTS -> "Dokumente"; Screen.MORE -> "Mehr"
+        Screen.TODAY -> "Heute"; Screen.CUSTOMERS -> "Kunden"; Screen.CUSTOMER_FORM -> "Neuer Kunde"; Screen.PROJECTS -> "Projekte"; Screen.PROJECT_FORM -> "Neues Projekt"; Screen.PROJECT -> "Projekt"; Screen.REPORTS -> "Rapporte"; Screen.EXISTING_REPORT -> "Rapport unterschreiben"; Screen.TIME_ENTRY -> "Zeiten"; Screen.REPORT -> "Neuer Rapport"; Screen.PHOTOS -> "Fotos"; Screen.SCANNER -> "Scanner"; Screen.MATERIAL -> "Material"; Screen.DOCUMENTS -> "Dokumente"; Screen.MORE -> "Mehr"
     }
     Surface(color = MaterialTheme.colorScheme.surface, shadowElevation = 1.dp) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1635,7 +1917,7 @@ private fun AppBottomBar(selected: Screen, navigate: (Screen) -> Unit) {
     NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 5.dp) {
         items.forEach { (screen, icon, label) ->
             val isSelected = selected == screen ||
-                (screen == Screen.PROJECTS && selected in listOf(Screen.PROJECT_FORM, Screen.PROJECT, Screen.PHOTOS, Screen.REPORT, Screen.TIME_ENTRY)) ||
+                (screen == Screen.PROJECTS && selected in listOf(Screen.PROJECT_FORM, Screen.PROJECT, Screen.REPORTS, Screen.EXISTING_REPORT, Screen.PHOTOS, Screen.REPORT, Screen.TIME_ENTRY)) ||
                 (screen == Screen.CUSTOMERS && selected == Screen.CUSTOMER_FORM)
             NavigationBarItem(
                 selected = isSelected,
@@ -1892,6 +2174,7 @@ private fun ProjectFormScreen(state: ProjectFormState, customers: List<CustomerD
 private fun ProjectScreen(
     project: ProjectDto?,
     openTimeEntry: () -> Unit,
+    openReports: () -> Unit,
     openDocuments: () -> Unit,
     openPhotos: () -> Unit,
     openReport: () -> Unit
@@ -1911,8 +2194,195 @@ private fun ProjectScreen(
         PrimaryAction("Arbeitszeit eintragen", Icons.Default.Schedule, openTimeEntry)
         PrimaryAction("Material", Icons.Default.Inventory2) {}
         PrimaryAction("Dokumente", Icons.Default.Description, openDocuments)
+        PrimaryAction("Rapporte öffnen", Icons.Default.Assignment, openReports)
         PrimaryAction("Fotos", Icons.Default.PhotoCamera, openPhotos)
-        PrimaryAction("Rapport erstellen", Icons.Default.EditNote, openReport)
+        PrimaryAction("Neuen Rapport erstellen", Icons.Default.EditNote, openReport)
+    }
+}
+
+@Composable
+private fun ProjectReportsScreen(
+    project: ProjectDto?,
+    state: ExistingReportState,
+    openReport: (Int) -> Unit,
+    refresh: () -> Unit
+) {
+    if (project == null) {
+        ScreenColumn { EmptyState("Kein Projekt ausgewählt.") }
+        return
+    }
+
+    LaunchedEffect(project.id) { refresh() }
+
+    ScreenColumn {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Rapporte", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                Text(project.projectName, style = MaterialTheme.typography.bodyMedium)
+            }
+            IconButton(onClick = refresh) { Icon(Icons.Default.Refresh, "Aktualisieren") }
+        }
+
+        when {
+            state.loading -> LoadingState()
+            state.error != null -> ErrorState(state.error, refresh)
+            state.reports.isEmpty() -> EmptyState("Für dieses Projekt gibt es noch keine Rapporte.")
+            else -> state.reports.forEach { report ->
+                val statusColor = when (report.status.lowercase()) {
+                    "unterschrieben" -> MaterialTheme.colorScheme.primary
+                    "entwurf", "zur unterschrift" -> MaterialTheme.colorScheme.tertiary
+                    else -> MaterialTheme.colorScheme.secondary
+                }
+                Card(
+                    onClick = { openReport(report.id) },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(20.dp)
+                ) {
+                    Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Surface(shape = RoundedCornerShape(14.dp), color = statusColor.copy(alpha = 0.14f)) {
+                            Icon(
+                                if (report.status.equals("Unterschrieben", true)) Icons.Default.Verified else Icons.Default.Draw,
+                                null,
+                                Modifier.padding(10.dp),
+                                tint = statusColor
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(report.reportNo.ifBlank { report.title }, fontWeight = FontWeight.Bold)
+                            if (report.title.isNotBlank() && report.reportNo.isNotBlank()) {
+                                Text(report.title, style = MaterialTheme.typography.bodyMedium)
+                            }
+                            Text(
+                                listOf(report.reportDate, report.status).filter { it.isNotBlank() }.joinToString(" · "),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = statusColor
+                            )
+                        }
+                        Icon(Icons.Default.ChevronRight, null)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ExistingReportScreen(state: ExistingReportState, vm: AppViewModel) {
+    val report = state.selected
+
+    ScreenColumn {
+        when {
+            state.detailLoading -> LoadingState()
+            state.error != null && report == null -> ErrorState(state.error) {}
+            report == null -> EmptyState("Rapport konnte nicht geladen werden.")
+            else -> {
+                Text(report.reportNo, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                Text(report.title, style = MaterialTheme.typography.titleLarge)
+                AssistChip(onClick = {}, label = { Text(report.status) })
+
+                Card(shape = RoundedCornerShape(22.dp), modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        ReportInfoLine("Datum", report.reportDate)
+                        ReportInfoLine("Ausgeführte Arbeiten", report.description)
+                        if (report.customerNote.isNotBlank()) {
+                            ReportInfoLine("Hinweis für den Kunden", report.customerNote)
+                        }
+                        ReportInfoLine("Fotos", "${report.photoCount}")
+                    }
+                }
+
+                Text("Arbeitszeiten", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                report.hours.forEach { hour ->
+                    Card(shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(14.dp)) {
+                            Text("${hour.workDate} · ${hour.userId}", fontWeight = FontWeight.SemiBold)
+                            Text("${String.format(java.util.Locale.GERMANY, "%.2f", hour.hours)} h · ${hour.activity}")
+                        }
+                    }
+                }
+
+                if (report.items.isNotEmpty()) {
+                    Text("Material", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    report.items.forEach { item ->
+                        Card(shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
+                            Column(Modifier.padding(14.dp)) {
+                                Text(item.description, fontWeight = FontWeight.SemiBold)
+                                Text("${String.format(java.util.Locale.GERMANY, "%.3f", item.quantity)} ${item.unit}")
+                                if (item.notes.isNotBlank()) Text(item.notes, style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
+                }
+
+                if (report.status.equals("Unterschrieben", true)) {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(Modifier.padding(18.dp)) {
+                            Text("Rapport ist unterschrieben", fontWeight = FontWeight.Bold)
+                            Text(
+                                listOf(report.signedBy, report.signedAt).filter { it.isNotBlank() }.joinToString(" · ")
+                            )
+                        }
+                    }
+                } else {
+                    Text("Unterschriften", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+
+                    OutlinedTextField(
+                        state.customerSignedBy,
+                        vm::updateExistingCustomerName,
+                        label = { Text("Name des Kunden") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    SignaturePad(
+                        label = "Kunde unterschreibt hier",
+                        signatureData = state.customerSignatureData,
+                        onSignatureChanged = vm::updateExistingCustomerSignature
+                    )
+
+                    OutlinedTextField(
+                        state.technicianSignedBy,
+                        vm::updateExistingTechnicianName,
+                        label = { Text("Name des Monteurs") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    SignaturePad(
+                        label = "Monteur unterschreibt hier",
+                        signatureData = state.technicianSignatureData,
+                        onSignatureChanged = vm::updateExistingTechnicianSignature
+                    )
+
+                    state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    state.success?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
+
+                    Button(
+                        onClick = vm::signExistingReport,
+                        enabled = !state.saving,
+                        modifier = Modifier.fillMaxWidth().height(60.dp),
+                        shape = RoundedCornerShape(18.dp)
+                    ) {
+                        if (state.saving) {
+                            CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+                        } else {
+                            Icon(Icons.Default.Verified, null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Rapport unterschreiben und abschließen", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReportInfoLine(label: String, value: String) {
+    if (value.isBlank()) return
+    Column {
+        Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, style = MaterialTheme.typography.bodyLarge)
     }
 }
 
@@ -3789,7 +4259,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
         Text("Mehr", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Text(login.displayName, fontWeight = FontWeight.Bold)
         Text(roleLabel(login.role))
-        Text("NextERP Mobile 2.1.1 · API v1")
+        Text("NextERP Mobile 2.2.0 · API v1")
         OutlinedButton(onClick = logout, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Logout, null); Spacer(Modifier.width(8.dp)); Text("Abmelden") }
     }
 }
