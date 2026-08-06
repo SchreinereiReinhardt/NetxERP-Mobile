@@ -1743,7 +1743,7 @@ private fun SplashScreen() {
             verticalArrangement = Arrangement.Center
         ) {
             Image(
-                painter = painterResource(id = R.mipmap.ic_launcher),
+                painter = painterResource(id = R.drawable.nexterp_logo),
                 contentDescription = "NextERP",
                 modifier = Modifier.size(132.dp)
             )
@@ -1806,7 +1806,7 @@ private fun LoginScreen(state: LoginState, vm: AppViewModel) {
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Image(
-                    painter = painterResource(id = R.mipmap.ic_launcher),
+                    painter = painterResource(id = R.drawable.nexterp_logo),
                     contentDescription = "NextERP",
                     modifier = Modifier.size(82.dp)
                 )
@@ -4364,7 +4364,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Image(
-                    painter = painterResource(id = R.mipmap.ic_launcher),
+                    painter = painterResource(id = R.drawable.nexterp_logo),
                     contentDescription = "NextERP",
                     modifier = Modifier.size(104.dp)
                 )
@@ -4390,7 +4390,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
                 Spacer(Modifier.height(16.dp))
                 AssistChip(
                     onClick = {},
-                    label = { Text("Version 2.3.0 · API v1") },
+                    label = { Text("Version 2.3.1 · API v1") },
                     colors = AssistChipDefaults.assistChipColors(
                         containerColor = Color.White.copy(alpha = 0.12f),
                         labelColor = Color.White
