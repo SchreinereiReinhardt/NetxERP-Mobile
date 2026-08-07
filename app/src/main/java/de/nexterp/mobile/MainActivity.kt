@@ -286,6 +286,8 @@ data class ExistingReportState(
 
 data class DataState(
     val loading: Boolean = false,
+    val lastSyncAt: java.time.LocalDateTime? = null,
+    val connectionOk: Boolean = true,
     val dashboard: DashboardData? = null,
     val projects: List<ProjectDto> = emptyList(),
     val customers: List<CustomerDto> = emptyList(),
@@ -1268,12 +1270,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val message = dashboardResult.exceptionOrNull()?.message
                 ?: projectsResult.exceptionOrNull()?.message
                 ?: "Daten konnten nicht geladen werden."
-            dataState = dataState.copy(loading = false, error = message)
+            dataState = dataState.copy(
+                loading = false,
+                connectionOk = false,
+                error = message
+            )
             return
         }
 
         dataState = DataState(
             loading = false,
+            lastSyncAt = java.time.LocalDateTime.now(),
+            connectionOk = true,
             dashboard = dashboardResult.getOrNull(),
             projects = projectsResult.getOrNull().orEmpty(),
             materials = dataState.materials,
@@ -2249,35 +2257,197 @@ private fun AppBottomBar(selected: Screen, navigate: (Screen) -> Unit) {
 
 @Composable
 private fun TodayScreen(state: DataState, openProject: (ProjectDto) -> Unit, refresh: () -> Unit) {
+    val now = java.time.LocalDateTime.now()
+    val greeting = when (now.hour) {
+        in 5..10 -> "Guten Morgen"
+        in 11..16 -> "Guten Tag"
+        in 17..21 -> "Guten Abend"
+        else -> "Willkommen zurück"
+    }
+    val dateText = now.format(
+        java.time.format.DateTimeFormatter.ofPattern(
+            "EEEE, dd. MMMM yyyy",
+            java.util.Locale.GERMAN
+        )
+    ).replaceFirstChar {
+        if (it.isLowerCase()) it.titlecase(java.util.Locale.GERMAN) else it.toString()
+    }
+
+    val syncText = state.lastSyncAt?.let {
+        "Synchronisiert um " + it.format(
+            java.time.format.DateTimeFormatter.ofPattern("HH:mm")
+        ) + " Uhr"
+    } ?: "Noch nicht synchronisiert"
+
     ScreenColumn {
         when {
-            state.loading -> LoadingState()
-            state.error != null -> ErrorState(state.error, refresh)
+            state.loading && state.dashboard == null -> LoadingState()
+            state.error != null && state.dashboard == null -> ErrorState(state.error, refresh)
             state.dashboard == null -> EmptyState("Noch keine Dashboard-Daten")
             else -> {
                 val data = state.dashboard
+
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(28.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primary)
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primary
+                    )
                 ) {
-                    Row(Modifier.fillMaxWidth().padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Guten Morgen", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.78f))
-                            Text("Alles für heute.", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.onPrimary)
-                            Spacer(Modifier.height(8.dp))
-                            Text("${data.projectsToday} Projekte · ${data.reportsOpen} offene Rapporte", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.88f))
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(20.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    greeting,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.82f)
+                                )
+                                Text(
+                                    "Alles für heute.",
+                                    style = MaterialTheme.typography.headlineMedium,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = MaterialTheme.colorScheme.onPrimary
+                                )
+                                Spacer(Modifier.height(6.dp))
+                                Text(
+                                    dateText,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.88f)
+                                )
+                            }
+
+                            Surface(
+                                shape = RoundedCornerShape(22.dp),
+                                color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.12f)
+                            ) {
+                                Icon(
+                                    Icons.Default.Construction,
+                                    null,
+                                    Modifier.padding(16.dp).size(36.dp),
+                                    tint = MaterialTheme.colorScheme.onPrimary
+                                )
+                            }
                         }
-                        Surface(shape = RoundedCornerShape(22.dp), color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.12f)) {
-                            Icon(Icons.Default.Construction, null, Modifier.padding(16.dp).size(36.dp), tint = MaterialTheme.colorScheme.onPrimary)
+
+                        HorizontalDivider(
+                            color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.16f)
+                        )
+
+                        Text(
+                            "${data.projectsToday} Projekte · ${data.reportsOpen} offene Rapporte",
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
+                    }
+                }
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(20.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (state.connectionOk) {
+                            MaterialTheme.colorScheme.primaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.errorContainer
+                        }
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 13.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            if (state.connectionOk) Icons.Default.CloudDone else Icons.Default.CloudOff,
+                            null,
+                            modifier = Modifier.size(25.dp),
+                            tint = if (state.connectionOk) {
+                                MaterialTheme.colorScheme.onPrimaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.onErrorContainer
+                            }
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                if (state.connectionOk) "NextERP ist online" else "Verbindung unterbrochen",
+                                fontWeight = FontWeight.Bold,
+                                color = if (state.connectionOk) {
+                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.onErrorContainer
+                                }
+                            )
+                            Text(
+                                if (state.connectionOk) syncText else "Die zuletzt geladenen Daten bleiben sichtbar.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (state.connectionOk) {
+                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.onErrorContainer
+                                }
+                            )
+                        }
+
+                        FilledTonalIconButton(
+                            onClick = refresh,
+                            enabled = !state.loading
+                        ) {
+                            if (state.loading) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Icon(Icons.Default.Refresh, "Synchronisieren")
+                            }
                         }
                     }
                 }
-                Text("Überblick", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
+
+                state.error?.let { message ->
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer
+                        )
+                    ) {
+                        Text(
+                            message,
+                            modifier = Modifier.padding(14.dp),
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+
+                Text(
+                    "Überblick",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.ExtraBold
+                )
                 MetricGrid(data)
-                Text("Aktuelle Projekte", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
-                if (data.recentProjects.isEmpty()) EmptyState("Keine aktiven Projekte gefunden.")
-                else data.recentProjects.take(4).forEach { project -> ProjectCard(project) { openProject(project) } }
+
+                Text(
+                    "Aktuelle Projekte",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.ExtraBold
+                )
+                if (data.recentProjects.isEmpty()) {
+                    EmptyState("Keine aktiven Projekte gefunden.")
+                } else {
+                    data.recentProjects.take(4).forEach { project ->
+                        ProjectCard(project) { openProject(project) }
+                    }
+                }
             }
         }
     }
@@ -4966,7 +5136,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
                 Spacer(Modifier.height(16.dp))
                 AssistChip(
                     onClick = {},
-                    label = { Text("Version 2.4.0 · API v1") },
+                    label = { Text("Version 2.4.1 · API v1") },
                     colors = AssistChipDefaults.assistChipColors(
                         containerColor = Color.White.copy(alpha = 0.12f),
                         labelColor = Color.White
