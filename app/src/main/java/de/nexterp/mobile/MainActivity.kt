@@ -9,6 +9,7 @@ import android.graphics.Bitmap
 import android.graphics.Paint
 import android.util.Base64
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -387,6 +388,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val bearerToken: String get() = accessToken
 
     fun navigate(target: Screen) { screen = target }
+
+    fun canGoBack(): Boolean = screen != Screen.TODAY
+
+    fun goBack() {
+        screen = when (screen) {
+            Screen.CUSTOMER_FORM -> Screen.CUSTOMERS
+            Screen.PROJECT_FORM -> Screen.PROJECTS
+            Screen.PROJECT -> Screen.PROJECTS
+            Screen.REPORTS -> Screen.PROJECT
+            Screen.EXISTING_REPORT -> Screen.REPORTS
+            Screen.TIME_ENTRY -> Screen.PROJECT
+            Screen.REPORT -> Screen.PROJECT
+            Screen.PHOTOS -> Screen.PROJECT
+            Screen.DOCUMENTS -> if (dataState.selectedProject != null) Screen.PROJECT else Screen.TODAY
+            Screen.MATERIAL -> Screen.TODAY
+            Screen.CUSTOMERS -> Screen.TODAY
+            Screen.PROJECTS -> Screen.TODAY
+            Screen.SCANNER -> Screen.TODAY
+            Screen.MORE -> Screen.TODAY
+            Screen.TODAY -> Screen.TODAY
+        }
+    }
 
     fun canManageMasterData(): Boolean =
         loginState.role.lowercase() in setOf("administrator", "admin", "office", "manager")
@@ -1904,8 +1927,22 @@ private fun LoginScreen(state: LoginState, vm: AppViewModel) {
 
 @Composable
 private fun AppShell(vm: AppViewModel) {
+    BackHandler(enabled = vm.canGoBack()) {
+        vm.goBack()
+    }
+
     Scaffold(
-        topBar = { AppHeader(vm.loginState.displayName, vm.loginState.role, vm.screen, vm::refresh, vm::logout) },
+        topBar = {
+            AppHeader(
+                name = vm.loginState.displayName,
+                role = vm.loginState.role,
+                screen = vm.screen,
+                canGoBack = vm.canGoBack(),
+                onBack = vm::goBack,
+                onRefresh = vm::refresh,
+                onLogout = vm::logout
+            )
+        },
         bottomBar = { AppBottomBar(vm.screen, vm::navigate) }
     ) { padding ->
         Box(Modifier.padding(padding)) {
@@ -1970,14 +2007,28 @@ private fun AppShell(vm: AppViewModel) {
 }
 
 @Composable
-private fun AppHeader(name: String, role: String, screen: Screen, onRefresh: () -> Unit, onLogout: () -> Unit) {
+private fun AppHeader(
+    name: String,
+    role: String,
+    screen: Screen,
+    canGoBack: Boolean,
+    onBack: () -> Unit,
+    onRefresh: () -> Unit,
+    onLogout: () -> Unit
+) {
     val title = when (screen) {
         Screen.TODAY -> "Heute"; Screen.CUSTOMERS -> "Kunden"; Screen.CUSTOMER_FORM -> "Neuer Kunde"; Screen.PROJECTS -> "Projekte"; Screen.PROJECT_FORM -> "Neues Projekt"; Screen.PROJECT -> "Projekt"; Screen.REPORTS -> "Rapporte"; Screen.EXISTING_REPORT -> "Rapport unterschreiben"; Screen.TIME_ENTRY -> "Zeiten"; Screen.REPORT -> "Neuer Rapport"; Screen.PHOTOS -> "Fotos"; Screen.SCANNER -> "Scanner"; Screen.MATERIAL -> "Material"; Screen.DOCUMENTS -> "Dokumente"; Screen.MORE -> "Mehr"
     }
     Surface(color = MaterialTheme.colorScheme.surface, shadowElevation = 1.dp) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Surface(shape = RoundedCornerShape(15.dp), color = MaterialTheme.colorScheme.primaryContainer) {
-                Icon(Icons.Default.Handyman, null, Modifier.padding(10.dp).size(24.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
+            if (canGoBack) {
+                FilledTonalIconButton(onClick = onBack) {
+                    Icon(Icons.Default.ArrowBack, "Zurück")
+                }
+            } else {
+                Surface(shape = RoundedCornerShape(15.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                    Icon(Icons.Default.Handyman, null, Modifier.padding(10.dp).size(24.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                }
             }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
@@ -4392,7 +4443,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
                 Spacer(Modifier.height(16.dp))
                 AssistChip(
                     onClick = {},
-                    label = { Text("Version 2.3.2 · API v1") },
+                    label = { Text("Version 2.3.3 · API v1") },
                     colors = AssistChipDefaults.assistChipColors(
                         containerColor = Color.White.copy(alpha = 0.12f),
                         labelColor = Color.White
