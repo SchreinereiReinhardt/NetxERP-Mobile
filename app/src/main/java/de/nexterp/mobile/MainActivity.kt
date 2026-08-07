@@ -608,16 +608,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         if (dataState.documentUploadLoading) return
 
-        val cleanTitle = title.trim()
         val cleanContent = content.trim()
 
-        if (cleanTitle.isBlank()) {
-            dataState = dataState.copy(
-                documentUploadError = "Bitte einen Titel eingeben.",
-                documentUploadSuccess = null
-            )
-            return
-        }
         if (cleanContent.isBlank()) {
             dataState = dataState.copy(
                 documentUploadError = "Bitte einen Inhalt eingeben.",
@@ -638,6 +630,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val now = java.time.LocalDateTime.now()
             val dateText = now.format(java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm"))
             val fileDate = now.format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm"))
+            val automaticTitle = when (noteType) {
+                "Baustellenprotokoll" -> "Baustellenprotokoll"
+                "Aufmaß" -> "Aufmaß"
+                "Telefonnotiz" -> "Telefonnotiz"
+                else -> "Notiz"
+            } + " " + now.format(java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm"))
+            val cleanTitle = title.trim().ifBlank { automaticTitle }
 
             val markdown = buildString {
                 append("# ").append(cleanTitle).append("\n\n")
@@ -3997,7 +3996,7 @@ private fun DocumentsScreen(
     val context = LocalContext.current
     var search by remember { mutableStateOf("") }
     var currentPath by remember { mutableStateOf<List<String>>(emptyList()) }
-    var showNewNoteDialog by remember { mutableStateOf(false) }
+    var showNewNoteEditor by remember { mutableStateOf(false) }
     var noteType by remember { mutableStateOf("Notiz") }
     var noteTitle by remember { mutableStateOf("") }
     var noteContent by remember { mutableStateOf("") }
@@ -4010,6 +4009,55 @@ private fun DocumentsScreen(
         noteContent = ""
         noteType = "Notiz"
         clearUploadMessage()
+    }
+
+    BackHandler(enabled = showNewNoteEditor) {
+        if (!state.documentUploadLoading) {
+            showNewNoteEditor = false
+            clearUploadMessage()
+        }
+    }
+
+    LaunchedEffect(state.documentUploadSuccess) {
+        if (state.documentUploadSuccess != null && showNewNoteEditor) {
+            showNewNoteEditor = false
+            noteTitle = ""
+            noteContent = ""
+            noteType = "Notiz"
+        }
+    }
+
+    if (showNewNoteEditor && project != null) {
+        ProjectNoteEditor(
+            project = project,
+            noteType = noteType,
+            noteTitle = noteTitle,
+            noteContent = noteContent,
+            saving = state.documentUploadLoading,
+            error = state.documentUploadError,
+            onTypeChange = {
+                noteType = it
+                clearUploadMessage()
+            },
+            onTitleChange = {
+                noteTitle = it
+                clearUploadMessage()
+            },
+            onContentChange = {
+                noteContent = it
+                clearUploadMessage()
+            },
+            onCancel = {
+                if (!state.documentUploadLoading) {
+                    showNewNoteEditor = false
+                    clearUploadMessage()
+                }
+            },
+            onSave = {
+                createNote(project.id, noteType, noteTitle, noteContent)
+            }
+        )
+        return
     }
 
     ScreenColumn {
@@ -4107,7 +4155,7 @@ private fun DocumentsScreen(
                 noteType = "Notiz"
                 noteTitle = ""
                 noteContent = ""
-                showNewNoteDialog = true
+                showNewNoteEditor = true
             },
             modifier = Modifier.fillMaxWidth().height(54.dp),
             shape = RoundedCornerShape(16.dp)
@@ -4293,146 +4341,244 @@ private fun DocumentsScreen(
         }
     }
 
-    if (showNewNoteDialog && project != null) {
-        AlertDialog(
-            onDismissRequest = {
-                if (!state.documentUploadLoading) {
-                    showNewNoteDialog = false
-                }
-            },
-            icon = { Icon(Icons.Default.NoteAdd, null) },
-            title = { Text("Projektdatei erstellen") },
-            text = {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+}
+
+
+@Composable
+private fun ProjectNoteEditor(
+    project: ProjectDto,
+    noteType: String,
+    noteTitle: String,
+    noteContent: String,
+    saving: Boolean,
+    error: String?,
+    onTypeChange: (String) -> Unit,
+    onTitleChange: (String) -> Unit,
+    onContentChange: (String) -> Unit,
+    onCancel: () -> Unit,
+    onSave: () -> Unit
+) {
+    val types = listOf(
+        Pair("Notiz", Icons.Default.StickyNote2),
+        Pair("Baustellenprotokoll", Icons.Default.Assignment),
+        Pair("Aufmaß", Icons.Default.Straighten),
+        Pair("Telefonnotiz", Icons.Default.PhoneInTalk)
+    )
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+    ) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                FilledTonalIconButton(
+                    onClick = onCancel,
+                    enabled = !saving,
+                    modifier = Modifier.size(54.dp)
                 ) {
+                    Icon(
+                        Icons.Default.ArrowBack,
+                        "Zurück",
+                        modifier = Modifier.size(27.dp)
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
                     Text(
-                        "Die Notiz wird als echte Markdown-Datei im Projekt gespeichert.",
+                        "Neue Projektnotiz",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                    Text(
+                        listOf(project.projectNo, project.projectName)
+                            .filter { it.isNotBlank() }
+                            .joinToString(" · "),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+            }
 
-                    Text("Typ", fontWeight = FontWeight.SemiBold)
+            Text(
+                "Was möchtest du festhalten?",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
 
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf(
-                            "Notiz",
-                            "Baustellenprotokoll",
-                            "Aufmaß",
-                            "Telefonnotiz"
-                        ).forEach { type ->
-                            FilterChip(
-                                selected = noteType == type,
-                                onClick = { noteType = type },
-                                label = { Text(type) },
-                                leadingIcon = {
-                                    Icon(
-                                        when (type) {
-                                            "Baustellenprotokoll" -> Icons.Default.Assignment
-                                            "Aufmaß" -> Icons.Default.Straighten
-                                            "Telefonnotiz" -> Icons.Default.PhoneInTalk
-                                            else -> Icons.Default.StickyNote2
-                                        },
-                                        null,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
-                            )
+            types.chunked(2).forEach { items ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items.forEach { (type, icon) ->
+                        if (noteType == type) {
+                            Button(
+                                onClick = { onTypeChange(type) },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(68.dp),
+                                shape = RoundedCornerShape(18.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp)
+                            ) {
+                                Icon(icon, null, Modifier.size(23.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text(type, fontWeight = FontWeight.Bold, maxLines = 2)
+                            }
+                        } else {
+                            FilledTonalButton(
+                                onClick = { onTypeChange(type) },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(68.dp),
+                                shape = RoundedCornerShape(18.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp)
+                            ) {
+                                Icon(icon, null, Modifier.size(23.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text(type, fontWeight = FontWeight.SemiBold, maxLines = 2)
+                            }
                         }
                     }
-
-                    OutlinedTextField(
-                        value = noteTitle,
-                        onValueChange = {
-                            noteTitle = it
-                            clearUploadMessage()
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Titel") },
-                        placeholder = { Text("z. B. Änderungen Küche") },
-                        singleLine = true
-                    )
-
-                    OutlinedTextField(
-                        value = noteContent,
-                        onValueChange = {
-                            noteContent = it
-                            clearUploadMessage()
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 220.dp),
-                        label = { Text("Notiz") },
-                        placeholder = {
-                            Text("Text eingeben oder die Spracheingabe der Android-Tastatur verwenden …")
-                        },
-                        minLines = 8
-                    )
-
-                    Text(
-                        "Datum, Projekt und Ersteller werden automatisch ergänzt.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    state.documentUploadError?.let {
-                        Text(
-                            it,
-                            color = MaterialTheme.colorScheme.error,
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
                 }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        createNote(
-                            project.id,
-                            noteType,
-                            noteTitle,
-                            noteContent
-                        )
-                    },
-                    enabled = !state.documentUploadLoading &&
-                        noteTitle.isNotBlank() &&
-                        noteContent.isNotBlank()
+            }
+
+            OutlinedTextField(
+                value = noteTitle,
+                onValueChange = onTitleChange,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 68.dp),
+                label = { Text("Titel (optional)") },
+                placeholder = { Text("Leer lassen = automatisch") },
+                singleLine = true,
+                shape = RoundedCornerShape(18.dp)
+            )
+
+            OutlinedTextField(
+                value = noteContent,
+                onValueChange = onContentChange,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 330.dp),
+                label = { Text("Notiz") },
+                placeholder = {
+                    Text("Hier schreiben oder über das Mikrofon der Android-Tastatur diktieren …")
+                },
+                minLines = 14,
+                shape = RoundedCornerShape(18.dp)
+            )
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                )
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    if (state.documentUploadLoading) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(18.dp),
-                            strokeWidth = 2.dp
+                    Icon(
+                        Icons.Default.Mic,
+                        null,
+                        modifier = Modifier.size(25.dp),
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            "Diktieren statt tippen",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
                         )
-                        Spacer(Modifier.width(8.dp))
-                    } else {
-                        Icon(Icons.Default.Save, null)
-                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Mikrofon auf der Android-Tastatur antippen und sprechen.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
                     }
-                    Text("Speichern")
                 }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = {
-                        showNewNoteDialog = false
-                        clearUploadMessage()
-                    },
-                    enabled = !state.documentUploadLoading
+            }
+
+            Text(
+                "Datum, Projekt und Ersteller werden automatisch ergänzt. " +
+                    "Gespeichert wird eine echte Markdown-Datei im Projekt.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            error?.let {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    )
+                ) {
+                    Text(
+                        it,
+                        modifier = Modifier.padding(14.dp),
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                }
+            }
+        }
+
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shadowElevation = 8.dp,
+            color = MaterialTheme.colorScheme.surface
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedButton(
+                    onClick = onCancel,
+                    enabled = !saving,
+                    modifier = Modifier.height(60.dp),
+                    shape = RoundedCornerShape(18.dp)
                 ) {
                     Text("Abbrechen")
                 }
-            }
-        )
 
-        LaunchedEffect(state.documentUploadSuccess) {
-            if (state.documentUploadSuccess != null) {
-                showNewNoteDialog = false
-                noteTitle = ""
-                noteContent = ""
-                noteType = "Notiz"
+                Button(
+                    onClick = onSave,
+                    enabled = !saving && noteContent.isNotBlank(),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(60.dp),
+                    shape = RoundedCornerShape(18.dp)
+                ) {
+                    if (saving) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Icon(Icons.Default.Save, null, Modifier.size(23.dp))
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        if (saving) "Speichert …" else "Notiz speichern",
+                        fontWeight = FontWeight.Bold
+                    )
+                }
             }
         }
     }
@@ -4820,7 +4966,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
                 Spacer(Modifier.height(16.dp))
                 AssistChip(
                     onClick = {},
-                    label = { Text("Version 2.3.4 · API v1") },
+                    label = { Text("Version 2.4.0 · API v1") },
                     colors = AssistChipDefaults.assistChipColors(
                         containerColor = Color.White.copy(alpha = 0.12f),
                         labelColor = Color.White
