@@ -298,6 +298,9 @@ data class DataState(
     val documentsLoading: Boolean = false,
     val documentsProjectId: Int? = null,
     val documentsError: String? = null,
+    val documentUploadLoading: Boolean = false,
+    val documentUploadError: String? = null,
+    val documentUploadSuccess: String? = null,
     val photos: List<DocumentDto> = emptyList(),
     val photosLoading: Boolean = false,
     val photosProjectId: Int? = null,
@@ -595,6 +598,112 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         }
+    }
+
+    fun createProjectNote(
+        projectId: Int,
+        noteType: String,
+        title: String,
+        content: String
+    ) {
+        if (dataState.documentUploadLoading) return
+
+        val cleanTitle = title.trim()
+        val cleanContent = content.trim()
+
+        if (cleanTitle.isBlank()) {
+            dataState = dataState.copy(
+                documentUploadError = "Bitte einen Titel eingeben.",
+                documentUploadSuccess = null
+            )
+            return
+        }
+        if (cleanContent.isBlank()) {
+            dataState = dataState.copy(
+                documentUploadError = "Bitte einen Inhalt eingeben.",
+                documentUploadSuccess = null
+            )
+            return
+        }
+
+        viewModelScope.launch {
+            dataState = dataState.copy(
+                documentUploadLoading = true,
+                documentUploadError = null,
+                documentUploadSuccess = null
+            )
+
+            val project = dataState.selectedProject
+            val author = loginState.displayName.ifBlank { loginState.username }
+            val now = java.time.LocalDateTime.now()
+            val dateText = now.format(java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm"))
+            val fileDate = now.format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm"))
+
+            val markdown = buildString {
+                append("# ").append(cleanTitle).append("\n\n")
+                append("**Typ:** ").append(noteType).append("\n\n")
+                if (project != null) {
+                    append("**Projekt:** ")
+                    if (project.projectNo.isNotBlank()) {
+                        append(project.projectNo).append(" – ")
+                    }
+                    append(project.projectName).append("\n\n")
+                }
+                append("**Datum:** ").append(dateText).append("\n\n")
+                append("**Erstellt von:** ").append(author).append("\n\n")
+                append("---\n\n")
+                append(cleanContent).append("\n")
+            }
+
+            val safeTitle = cleanTitle
+                .replace(Regex("[^A-Za-z0-9ÄÖÜäöüß_-]+"), "_")
+                .trim('_')
+                .take(60)
+                .ifBlank { "Notiz" }
+
+            val typePrefix = when (noteType) {
+                "Baustellenprotokoll" -> "Baustellenprotokoll"
+                "Aufmaß" -> "Aufmass"
+                "Telefonnotiz" -> "Telefonnotiz"
+                else -> "Notiz"
+            }
+
+            val fileName = "${fileDate}_${typePrefix}_${safeTitle}.md"
+
+            val result = authorizedRequest { token ->
+                NextErpApi.uploadDocument(
+                    server = loginState.server,
+                    token = token,
+                    projectId = projectId,
+                    fileName = fileName,
+                    mimeType = "text/markdown; charset=utf-8",
+                    bytes = markdown.toByteArray(Charsets.UTF_8)
+                )
+            }
+
+            if (result.isFailure) {
+                dataState = dataState.copy(
+                    documentUploadLoading = false,
+                    documentUploadError = result.exceptionOrNull()?.message
+                        ?: "Notiz konnte nicht gespeichert werden."
+                )
+                return@launch
+            }
+
+            dataState = dataState.copy(
+                documentUploadLoading = false,
+                documentUploadError = null,
+                documentUploadSuccess = "$noteType wurde im Projekt gespeichert."
+            )
+            loadProjectDocuments(projectId)
+        }
+    }
+
+    fun clearDocumentUploadMessage() {
+        dataState = dataState.copy(
+            documentUploadError = null,
+            documentUploadSuccess = null
+        )
     }
 
     fun loadProjectDocuments(projectId: Int) {
@@ -1388,6 +1497,72 @@ object NextErpApi {
         request(server,"/report","POST",token,body) as? JSONObject ?: error("Ungültige Rapport-Antwort.")
     }
 
+    suspend fun uploadDocument(
+        server: String,
+        token: String,
+        projectId: Int,
+        fileName: String,
+        mimeType: String,
+        bytes: ByteArray
+    ): Result<JSONObject> = runCatching {
+        withContext(Dispatchers.IO) {
+            val boundary = "----NextERP${System.currentTimeMillis()}"
+            val url = URL(
+                apiBase(server) + "/upload?projectId=$projectId&type=document&category=Sonstige"
+            )
+            val connection = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 30_000
+                readTimeout = 60_000
+                doOutput = true
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("Authorization", "Bearer $token")
+                setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+            }
+
+            try {
+                connection.outputStream.use { output ->
+                    val header = buildString {
+                        append("--$boundary\r\n")
+                        append("Content-Disposition: form-data; name=\"file\"; filename=\"")
+                        append(fileName.replace("\"", "_"))
+                        append("\"\r\n")
+                        append("Content-Type: ").append(mimeType).append("\r\n\r\n")
+                    }.toByteArray(Charsets.UTF_8)
+
+                    output.write(header)
+                    output.write(bytes)
+                    output.write("\r\n--$boundary--\r\n".toByteArray(Charsets.UTF_8))
+                }
+
+                val code = connection.responseCode
+                val stream = if (code in 200..299) {
+                    connection.inputStream
+                } else {
+                    connection.errorStream
+                }
+                val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                val json = if (body.isBlank()) JSONObject() else JSONObject(body)
+
+                if (code == 401) {
+                    throw ApiUnauthorizedException(
+                        apiMessage(json, "Anmeldung abgelaufen.")
+                    )
+                }
+                if (code !in 200..299) {
+                    error(apiMessage(json, "Dokument konnte nicht gespeichert werden (HTTP $code)."))
+                }
+                if (!json.optBoolean("success", false)) {
+                    error(apiMessage(json, "Dokument konnte nicht gespeichert werden."))
+                }
+
+                json.optJSONObject("data") ?: error("Ungültige Upload-Antwort.")
+            } finally {
+                connection.disconnect()
+            }
+        }
+    }
+
     suspend fun uploadPhoto(
         server: String,
         token: String,
@@ -1996,6 +2171,8 @@ private fun AppShell(vm: AppViewModel) {
                     state = vm.dataState,
                     server = vm.loginState.server,
                     selectProject = vm::openProjectDocuments,
+                    createNote = vm::createProjectNote,
+                    clearUploadMessage = vm::clearDocumentUploadMessage,
                     refresh = {
                         vm.dataState.selectedProject?.let { vm.loadProjectDocuments(it.id) }
                     }
@@ -3813,16 +3990,26 @@ private fun DocumentsScreen(
     state: DataState,
     server: String,
     selectProject: (ProjectDto) -> Unit,
+    createNote: (Int, String, String, String) -> Unit,
+    clearUploadMessage: () -> Unit,
     refresh: () -> Unit
 ) {
     val context = LocalContext.current
     var search by remember { mutableStateOf("") }
     var currentPath by remember { mutableStateOf<List<String>>(emptyList()) }
+    var showNewNoteDialog by remember { mutableStateOf(false) }
+    var noteType by remember { mutableStateOf("Notiz") }
+    var noteTitle by remember { mutableStateOf("") }
+    var noteContent by remember { mutableStateOf("") }
     val project = state.selectedProject
 
     LaunchedEffect(project?.id) {
         currentPath = emptyList()
         search = ""
+        noteTitle = ""
+        noteContent = ""
+        noteType = "Notiz"
+        clearUploadMessage()
     }
 
     ScreenColumn {
@@ -3911,6 +4098,52 @@ private fun DocumentsScreen(
                         tint = MaterialTheme.colorScheme.onPrimaryContainer
                     )
                 }
+            }
+        }
+
+        Button(
+            onClick = {
+                clearUploadMessage()
+                noteType = "Notiz"
+                noteTitle = ""
+                noteContent = ""
+                showNewNoteDialog = true
+            },
+            modifier = Modifier.fillMaxWidth().height(54.dp),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Icon(Icons.Default.NoteAdd, null)
+            Spacer(Modifier.width(8.dp))
+            Text("Neue Projektnotiz")
+        }
+
+        state.documentUploadSuccess?.let { message ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                )
+            ) {
+                Text(
+                    message,
+                    modifier = Modifier.padding(14.dp),
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            }
+        }
+
+        state.documentUploadError?.let { message ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer
+                )
+            ) {
+                Text(
+                    message,
+                    modifier = Modifier.padding(14.dp),
+                    color = MaterialTheme.colorScheme.onErrorContainer
+                )
             }
         }
 
@@ -4056,6 +4289,150 @@ private fun DocumentsScreen(
                         EmptyState("Dieser Ordner ist leer.")
                     }
                 }
+            }
+        }
+    }
+
+    if (showNewNoteDialog && project != null) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!state.documentUploadLoading) {
+                    showNewNoteDialog = false
+                }
+            },
+            icon = { Icon(Icons.Default.NoteAdd, null) },
+            title = { Text("Projektdatei erstellen") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        "Die Notiz wird als echte Markdown-Datei im Projekt gespeichert.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Text("Typ", fontWeight = FontWeight.SemiBold)
+
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(
+                            "Notiz",
+                            "Baustellenprotokoll",
+                            "Aufmaß",
+                            "Telefonnotiz"
+                        ).forEach { type ->
+                            FilterChip(
+                                selected = noteType == type,
+                                onClick = { noteType = type },
+                                label = { Text(type) },
+                                leadingIcon = {
+                                    Icon(
+                                        when (type) {
+                                            "Baustellenprotokoll" -> Icons.Default.Assignment
+                                            "Aufmaß" -> Icons.Default.Straighten
+                                            "Telefonnotiz" -> Icons.Default.PhoneInTalk
+                                            else -> Icons.Default.StickyNote2
+                                        },
+                                        null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            )
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = noteTitle,
+                        onValueChange = {
+                            noteTitle = it
+                            clearUploadMessage()
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Titel") },
+                        placeholder = { Text("z. B. Änderungen Küche") },
+                        singleLine = true
+                    )
+
+                    OutlinedTextField(
+                        value = noteContent,
+                        onValueChange = {
+                            noteContent = it
+                            clearUploadMessage()
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 220.dp),
+                        label = { Text("Notiz") },
+                        placeholder = {
+                            Text("Text eingeben oder die Spracheingabe der Android-Tastatur verwenden …")
+                        },
+                        minLines = 8
+                    )
+
+                    Text(
+                        "Datum, Projekt und Ersteller werden automatisch ergänzt.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    state.documentUploadError?.let {
+                        Text(
+                            it,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        createNote(
+                            project.id,
+                            noteType,
+                            noteTitle,
+                            noteContent
+                        )
+                    },
+                    enabled = !state.documentUploadLoading &&
+                        noteTitle.isNotBlank() &&
+                        noteContent.isNotBlank()
+                ) {
+                    if (state.documentUploadLoading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(Modifier.width(8.dp))
+                    } else {
+                        Icon(Icons.Default.Save, null)
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    Text("Speichern")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showNewNoteDialog = false
+                        clearUploadMessage()
+                    },
+                    enabled = !state.documentUploadLoading
+                ) {
+                    Text("Abbrechen")
+                }
+            }
+        )
+
+        LaunchedEffect(state.documentUploadSuccess) {
+            if (state.documentUploadSuccess != null) {
+                showNewNoteDialog = false
+                noteTitle = ""
+                noteContent = ""
+                noteType = "Notiz"
             }
         }
     }
@@ -4443,7 +4820,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
                 Spacer(Modifier.height(16.dp))
                 AssistChip(
                     onClick = {},
-                    label = { Text("Version 2.3.3 · API v1") },
+                    label = { Text("Version 2.3.4 · API v1") },
                     colors = AssistChipDefaults.assistChipColors(
                         containerColor = Color.White.copy(alpha = 0.12f),
                         labelColor = Color.White
