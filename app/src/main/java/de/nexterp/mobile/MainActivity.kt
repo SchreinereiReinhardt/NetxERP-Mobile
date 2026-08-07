@@ -303,6 +303,7 @@ data class DataState(
     val documentUploadLoading: Boolean = false,
     val documentUploadError: String? = null,
     val documentUploadSuccess: String? = null,
+    val openNoteEditorRequested: Boolean = false,
     val photos: List<DocumentDto> = emptyList(),
     val photosLoading: Boolean = false,
     val photosProjectId: Int? = null,
@@ -407,7 +408,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             Screen.REPORT -> Screen.PROJECT
             Screen.PHOTOS -> Screen.PROJECT
             Screen.DOCUMENTS -> if (dataState.selectedProject != null) Screen.PROJECT else Screen.TODAY
-            Screen.MATERIAL -> Screen.TODAY
+            Screen.MATERIAL -> if (dataState.selectedProject != null) Screen.PROJECT else Screen.TODAY
             Screen.CUSTOMERS -> Screen.TODAY
             Screen.PROJECTS -> Screen.TODAY
             Screen.SCANNER -> Screen.TODAY
@@ -507,6 +508,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun openProject(project: ProjectDto) {
         dataState = dataState.copy(selectedProject = project)
         screen = Screen.PROJECT
+    }
+
+    fun openProjectNote(project: ProjectDto) {
+        dataState = dataState.copy(
+            selectedProject = project,
+            openNoteEditorRequested = true,
+            documentUploadError = null,
+            documentUploadSuccess = null
+        )
+        screen = Screen.DOCUMENTS
+        loadProjectDocuments(project.id)
+    }
+
+    fun consumeOpenNoteEditorRequest() {
+        dataState = dataState.copy(openNoteEditorRequested = false)
     }
 
     fun openProjectDocuments(project: ProjectDto) {
@@ -2139,6 +2155,10 @@ private fun AppShell(vm: AppViewModel) {
                     openTimeEntry = vm::openTimeEntry,
                     openReports = vm::openProjectReports,
                     openMaterial = { vm.navigate(Screen.MATERIAL) },
+                    openNote = {
+                        vm.dataState.selectedProject?.let(vm::openProjectNote)
+                    },
+                    openScanner = { vm.navigate(Screen.SCANNER) },
                     openDocuments = {
                         vm.dataState.selectedProject?.let(vm::openProjectDocuments)
                     },
@@ -2180,6 +2200,7 @@ private fun AppShell(vm: AppViewModel) {
                     selectProject = vm::openProjectDocuments,
                     createNote = vm::createProjectNote,
                     clearUploadMessage = vm::clearDocumentUploadMessage,
+                    consumeOpenNoteRequest = vm::consumeOpenNoteEditorRequest,
                     refresh = {
                         vm.dataState.selectedProject?.let { vm.loadProjectDocuments(it.id) }
                     }
@@ -2662,6 +2683,8 @@ private fun ProjectScreen(
     openTimeEntry: () -> Unit,
     openReports: () -> Unit,
     openMaterial: () -> Unit,
+    openNote: () -> Unit,
+    openScanner: () -> Unit,
     openDocuments: () -> Unit,
     openPhotos: () -> Unit,
     openReport: () -> Unit
@@ -2678,11 +2701,24 @@ private fun ProjectScreen(
         if (project.address.isNotBlank()) PrimaryAction("Navigation", Icons.Default.Navigation) { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=${Uri.encode(project.address)}"))) }
         if (project.phone.isNotBlank()) PrimaryAction("Anrufen", Icons.Default.Phone) { context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:${project.phone}"))) }
         if (project.email.isNotBlank()) PrimaryAction("E-Mail", Icons.Default.Email) { context.startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:${project.email}"))) }
+        Text(
+            "Schnellaktionen",
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold
+        )
+        PrimaryAction("Neue Notiz", Icons.Default.NoteAdd, openNote)
         PrimaryAction("Arbeitszeit eintragen", Icons.Default.Schedule, openTimeEntry)
         PrimaryAction("Material", Icons.Default.Inventory2, openMaterial)
+        PrimaryAction("Code scannen", Icons.Default.QrCodeScanner, openScanner)
+        PrimaryAction("Fotos", Icons.Default.PhotoCamera, openPhotos)
+
+        Text(
+            "Projekt",
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold
+        )
         PrimaryAction("Dokumente", Icons.Default.Description, openDocuments)
         PrimaryAction("Rapporte öffnen", Icons.Default.Assignment, openReports)
-        PrimaryAction("Fotos", Icons.Default.PhotoCamera, openPhotos)
         PrimaryAction("Neuen Rapport erstellen", Icons.Default.EditNote, openReport)
     }
 }
@@ -3752,22 +3788,138 @@ private fun MaterialScreen(
     initialQuery: String,
     loadMaterials: (String) -> Unit
 ) {
+    val context = LocalContext.current
     var query by remember(initialQuery) { mutableStateOf(initialQuery) }
-    LaunchedEffect(initialQuery) { loadMaterials(initialQuery) }
+    var scanning by remember { mutableStateOf(false) }
+    var scanError by remember { mutableStateOf<String?>(null) }
+
+    val scannerOptions = remember {
+        GmsBarcodeScannerOptions.Builder()
+            .setBarcodeFormats(Barcode.FORMAT_ALL_FORMATS)
+            .enableAutoZoom()
+            .build()
+    }
+    val scanner = remember { GmsBarcodeScanning.getClient(context, scannerOptions) }
+
+    fun scanMaterial() {
+        scanning = true
+        scanError = null
+        scanner.startScan()
+            .addOnSuccessListener { barcode ->
+                scanning = false
+                val value = barcode.rawValue.orEmpty().trim()
+                if (value.isNotBlank()) {
+                    query = value
+                    loadMaterials(value)
+                }
+            }
+            .addOnCanceledListener {
+                scanning = false
+            }
+            .addOnFailureListener { error ->
+                scanning = false
+                scanError = error.message ?: "Barcode konnte nicht gescannt werden."
+            }
+    }
+
+    LaunchedEffect(initialQuery) {
+        query = initialQuery
+        loadMaterials(initialQuery)
+    }
+
     ScreenColumn {
-        Text("Material", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Text(
+            "Material",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold
+        )
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.primaryContainer
+            )
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    "Material schnell finden",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    "Barcode scannen oder Artikel, Bezeichnung und Nummer eingeben.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+
+                Button(
+                    onClick = { scanMaterial() },
+                    enabled = !scanning,
+                    modifier = Modifier.fillMaxWidth().height(60.dp),
+                    shape = RoundedCornerShape(18.dp)
+                ) {
+                    if (scanning) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(22.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
+                    } else {
+                        Icon(Icons.Default.QrCodeScanner, null)
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        if (scanning) "Scanner läuft …" else "Barcode scannen",
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
+        scanError?.let { message ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer
+                )
+            ) {
+                Text(
+                    message,
+                    modifier = Modifier.padding(14.dp),
+                    color = MaterialTheme.colorScheme.onErrorContainer
+                )
+            }
+        }
+
         OutlinedTextField(
             value = query,
             onValueChange = { query = it },
             label = { Text("Artikel, Bezeichnung oder Barcode") },
             leadingIcon = { Icon(Icons.Default.Search, null) },
-            trailingIcon = { IconButton(onClick = { loadMaterials(query) }) { Icon(Icons.Default.Search, "Suchen") } },
+            trailingIcon = {
+                IconButton(onClick = { loadMaterials(query) }) {
+                    Icon(Icons.Default.Search, "Suchen")
+                }
+            },
             singleLine = true,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp)
         )
-        Button(onClick = { loadMaterials(query) }, modifier = Modifier.fillMaxWidth()) {
-            Icon(Icons.Default.Search, null); Spacer(Modifier.width(8.dp)); Text("Material suchen")
+
+        Button(
+            onClick = { loadMaterials(query) },
+            modifier = Modifier.fillMaxWidth().height(56.dp),
+            shape = RoundedCornerShape(18.dp)
+        ) {
+            Icon(Icons.Default.Search, null)
+            Spacer(Modifier.width(8.dp))
+            Text("Material suchen", fontWeight = FontWeight.Bold)
         }
+
         when {
             state.materialsLoading -> LoadingState()
             state.error != null -> ErrorState(state.error) { loadMaterials(query) }
@@ -4161,6 +4313,7 @@ private fun DocumentsScreen(
     selectProject: (ProjectDto) -> Unit,
     createNote: (Int, String, String, String) -> Unit,
     clearUploadMessage: () -> Unit,
+    consumeOpenNoteRequest: () -> Unit,
     refresh: () -> Unit
 ) {
     val context = LocalContext.current
@@ -4179,6 +4332,17 @@ private fun DocumentsScreen(
         noteContent = ""
         noteType = "Notiz"
         clearUploadMessage()
+    }
+
+    LaunchedEffect(state.openNoteEditorRequested, project?.id) {
+        if (state.openNoteEditorRequested && project != null) {
+            noteType = "Notiz"
+            noteTitle = ""
+            noteContent = ""
+            clearUploadMessage()
+            showNewNoteEditor = true
+            consumeOpenNoteRequest()
+        }
     }
 
     BackHandler(enabled = showNewNoteEditor) {
@@ -5136,7 +5300,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
                 Spacer(Modifier.height(16.dp))
                 AssistChip(
                     onClick = {},
-                    label = { Text("Version 2.4.1 · API v1") },
+                    label = { Text("Version 2.5.0 · API v1") },
                     colors = AssistChipDefaults.assistChipColors(
                         containerColor = Color.White.copy(alpha = 0.12f),
                         labelColor = Color.White
