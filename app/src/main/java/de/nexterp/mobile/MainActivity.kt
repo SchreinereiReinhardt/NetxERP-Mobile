@@ -1276,11 +1276,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun refresh() {
+        if (dataState.syncInProgress) return
         dataState = dataState.copy(
             syncInProgress = true,
             syncStatusMessage = "Synchronisierung läuft …"
         )
-        refreshInternal()
+        viewModelScope.launch {
+            refreshInternal()
+        }
     }
 
     private suspend fun refreshInternal() {
@@ -5377,7 +5380,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
                 Spacer(Modifier.height(16.dp))
                 AssistChip(
                     onClick = {},
-                    label = { Text("Version 2.6.0 · API v1") },
+                    label = { Text("Version 2.6.1 · API v1") },
                     colors = AssistChipDefaults.assistChipColors(
                         containerColor = Color.White.copy(alpha = 0.12f),
                         labelColor = Color.White
