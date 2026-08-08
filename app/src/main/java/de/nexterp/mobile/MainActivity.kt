@@ -2318,68 +2318,6 @@ private fun TodayScreen(state: DataState, openProject: (ProjectDto) -> Unit, ref
     } ?: "Noch nicht synchronisiert"
 
     ScreenColumn {
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(22.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = if (state.connectionOk)
-                    MaterialTheme.colorScheme.primaryContainer
-                else
-                    MaterialTheme.colorScheme.errorContainer
-            )
-        ) {
-            Column(
-                modifier = Modifier.fillMaxWidth().padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        if (state.connectionOk) Icons.Default.CloudDone else Icons.Default.CloudOff,
-                        contentDescription = null
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            when {
-                                state.syncInProgress -> "Synchronisierung läuft …"
-                                !state.connectionOk -> "Offline"
-                                state.pendingLocalChanges > 0 -> "${state.pendingLocalChanges} Änderung(en) warten"
-                                else -> "Alles synchronisiert"
-                            },
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            state.syncStatusMessage ?: syncText,
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                }
-
-                Button(
-                    onClick = refresh,
-                    enabled = !state.syncInProgress,
-                    modifier = Modifier.fillMaxWidth().height(56.dp),
-                    shape = RoundedCornerShape(18.dp)
-                ) {
-                    if (state.syncInProgress) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.onPrimary
-                        )
-                    } else {
-                        Icon(Icons.Default.Sync, contentDescription = null)
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    Text("Jetzt synchronisieren", fontWeight = FontWeight.Bold)
-                }
-            }
-        }
-
 
         when {
             state.loading && state.dashboard == null -> LoadingState()
@@ -5380,7 +5318,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
                 Spacer(Modifier.height(16.dp))
                 AssistChip(
                     onClick = {},
-                    label = { Text("Version 2.6.1 · API v1") },
+                    label = { Text("Version 2.6.2 · API v1") },
                     colors = AssistChipDefaults.assistChipColors(
                         containerColor = Color.White.copy(alpha = 0.12f),
                         labelColor = Color.White
