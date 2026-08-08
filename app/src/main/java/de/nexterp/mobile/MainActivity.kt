@@ -5391,25 +5391,25 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
                 Spacer(Modifier.height(16.dp))
                 AssistChip(
                     onClick = {},
-        OutlinedButton(
-            onClick = {
-                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(NEXT_ERP_PRIVACY_URL))
-                context.startActivity(intent)
-            },
-            modifier = Modifier.fillMaxWidth().height(54.dp),
-            shape = RoundedCornerShape(18.dp)
-        ) {
-            Icon(Icons.Default.PrivacyTip, contentDescription = null)
-            Spacer(Modifier.width(8.dp))
-            Text("Datenschutzerklärung")
-        }
-
-                    label = { Text("Version 2.8.0 · API v1") },
+label = { Text("Version 2.8.1 · API v1") },
                     colors = AssistChipDefaults.assistChipColors(
                         containerColor = Color.White.copy(alpha = 0.12f),
                         labelColor = Color.White
                     )
                 )
+
+                OutlinedButton(
+                    onClick = {
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(NEXT_ERP_PRIVACY_URL))
+                        context.startActivity(intent)
+                    },
+                    modifier = Modifier.fillMaxWidth().height(54.dp),
+                    shape = RoundedCornerShape(18.dp)
+                ) {
+                    Icon(Icons.Default.PrivacyTip, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Datenschutzerklärung")
+                }
             }
         }
 
