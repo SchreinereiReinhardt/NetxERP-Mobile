@@ -72,6 +72,8 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
+private const val NEXT_ERP_PRIVACY_URL = "https://www.schreinerei-reinhardt.de/datenschutz"
+
 enum class Screen { TODAY, CUSTOMERS, CUSTOMER_FORM, PROJECTS, PROJECT_FORM, PROJECT, REPORTS, EXISTING_REPORT, TIME_ENTRY, REPORT, PHOTOS, SCANNER, MATERIAL, DOCUMENTS, MORE }
 
 data class LoginState(
@@ -5341,6 +5343,7 @@ private fun PlaceholderScreen(title: String, subtitle: String, icon: ImageVector
 
 @Composable
 private fun MoreScreen(login: LoginState, logout: () -> Unit) {
+    val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
 
     ScreenColumn {
@@ -5388,7 +5391,20 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
                 Spacer(Modifier.height(16.dp))
                 AssistChip(
                     onClick = {},
-                    label = { Text("Version 2.7.0 · API v1") },
+        OutlinedButton(
+            onClick = {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(NEXT_ERP_PRIVACY_URL))
+                context.startActivity(intent)
+            },
+            modifier = Modifier.fillMaxWidth().height(54.dp),
+            shape = RoundedCornerShape(18.dp)
+        ) {
+            Icon(Icons.Default.PrivacyTip, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("Datenschutzerklärung")
+        }
+
+                    label = { Text("Version 2.8.0 · API v1") },
                     colors = AssistChipDefaults.assistChipColors(
                         containerColor = Color.White.copy(alpha = 0.12f),
                         labelColor = Color.White

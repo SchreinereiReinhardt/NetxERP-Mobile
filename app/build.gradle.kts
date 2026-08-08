@@ -6,14 +6,14 @@ plugins {
 
 android {
     namespace = "de.nexterp.mobile"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "de.nexterp.mobile"
         minSdk = 26
-        targetSdk = 35
-        versionCode = 37
-        versionName = "2.7.0"
+        targetSdk = 36
+        versionCode = 38
+        versionName = "2.8.0"
     }
 
     buildFeatures { compose = true }
