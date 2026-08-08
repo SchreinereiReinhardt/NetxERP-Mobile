@@ -288,6 +288,9 @@ data class DataState(
     val loading: Boolean = false,
     val lastSyncAt: java.time.LocalDateTime? = null,
     val connectionOk: Boolean = true,
+    val pendingLocalChanges: Int = 0,
+    val syncInProgress: Boolean = false,
+    val syncStatusMessage: String? = null,
     val dashboard: DashboardData? = null,
     val projects: List<ProjectDto> = emptyList(),
     val customers: List<CustomerDto> = emptyList(),
@@ -1273,7 +1276,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun refresh() {
-        viewModelScope.launch { refreshInternal() }
+        dataState = dataState.copy(
+            syncInProgress = true,
+            syncStatusMessage = "Synchronisierung läuft …"
+        )
+        refreshInternal()
     }
 
     private suspend fun refreshInternal() {
@@ -1289,6 +1296,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             dataState = dataState.copy(
                 loading = false,
                 connectionOk = false,
+                syncInProgress = false,
+                syncStatusMessage = "Offline – lokale Daten bleiben verfügbar",
                 error = message
             )
             return
@@ -1298,6 +1307,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             loading = false,
             lastSyncAt = java.time.LocalDateTime.now(),
             connectionOk = true,
+            syncInProgress = false,
+            syncStatusMessage = if (dataState.pendingLocalChanges == 0)
+                "Alles synchronisiert"
+            else
+                "${dataState.pendingLocalChanges} Änderung(en) warten",
             dashboard = dashboardResult.getOrNull(),
             projects = projectsResult.getOrNull().orEmpty(),
             materials = dataState.materials,
@@ -2301,6 +2315,69 @@ private fun TodayScreen(state: DataState, openProject: (ProjectDto) -> Unit, ref
     } ?: "Noch nicht synchronisiert"
 
     ScreenColumn {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(22.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = if (state.connectionOk)
+                    MaterialTheme.colorScheme.primaryContainer
+                else
+                    MaterialTheme.colorScheme.errorContainer
+            )
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        if (state.connectionOk) Icons.Default.CloudDone else Icons.Default.CloudOff,
+                        contentDescription = null
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            when {
+                                state.syncInProgress -> "Synchronisierung läuft …"
+                                !state.connectionOk -> "Offline"
+                                state.pendingLocalChanges > 0 -> "${state.pendingLocalChanges} Änderung(en) warten"
+                                else -> "Alles synchronisiert"
+                            },
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            state.syncStatusMessage ?: syncText,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+
+                Button(
+                    onClick = refresh,
+                    enabled = !state.syncInProgress,
+                    modifier = Modifier.fillMaxWidth().height(56.dp),
+                    shape = RoundedCornerShape(18.dp)
+                ) {
+                    if (state.syncInProgress) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
+                    } else {
+                        Icon(Icons.Default.Sync, contentDescription = null)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Text("Jetzt synchronisieren", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+
         when {
             state.loading && state.dashboard == null -> LoadingState()
             state.error != null && state.dashboard == null -> ErrorState(state.error, refresh)
@@ -5300,7 +5377,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
                 Spacer(Modifier.height(16.dp))
                 AssistChip(
                     onClick = {},
-                    label = { Text("Version 2.5.0 · API v1") },
+                    label = { Text("Version 2.6.0 · API v1") },
                     colors = AssistChipDefaults.assistChipColors(
                         containerColor = Color.White.copy(alpha = 0.12f),
                         labelColor = Color.White
