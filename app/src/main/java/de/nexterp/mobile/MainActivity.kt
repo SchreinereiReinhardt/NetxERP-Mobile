@@ -8,6 +8,13 @@ import android.os.Bundle
 import android.graphics.Bitmap
 import android.graphics.Paint
 import android.util.Base64
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import java.security.KeyStore
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -342,6 +349,57 @@ data class SessionData(
     val expiresIn: Int
 )
 
+private object SecureTokenStore {
+    private const val KEYSTORE = "AndroidKeyStore"
+    private const val KEY_ALIAS = "nexterp_session_tokens_v1"
+    private const val PREFIX = "enc:v1:"
+    private const val TRANSFORMATION = "AES/GCM/NoPadding"
+
+    private fun secretKey(): SecretKey {
+        val keyStore = KeyStore.getInstance(KEYSTORE).apply { load(null) }
+        val existing = keyStore.getKey(KEY_ALIAS, null) as? SecretKey
+        if (existing != null) return existing
+
+        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE)
+        generator.init(
+            KeyGenParameterSpec.Builder(
+                KEY_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .build()
+        )
+        return generator.generateKey()
+    }
+
+    fun encrypt(value: String): String {
+        if (value.isBlank()) return ""
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey())
+        val encrypted = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
+        val packed = ByteArray(cipher.iv.size + encrypted.size)
+        System.arraycopy(cipher.iv, 0, packed, 0, cipher.iv.size)
+        System.arraycopy(encrypted, 0, packed, cipher.iv.size, encrypted.size)
+        return PREFIX + Base64.encodeToString(packed, Base64.NO_WRAP)
+    }
+
+    fun decrypt(value: String?): String {
+        if (value.isNullOrBlank()) return ""
+        if (!value.startsWith(PREFIX)) return value // one-time migration of old installs
+        return runCatching {
+            val packed = Base64.decode(value.removePrefix(PREFIX), Base64.NO_WRAP)
+            require(packed.size > 12)
+            val iv = packed.copyOfRange(0, 12)
+            val encrypted = packed.copyOfRange(12, packed.size)
+            val cipher = Cipher.getInstance(TRANSFORMATION)
+            cipher.init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(128, iv))
+            String(cipher.doFinal(encrypted), Charsets.UTF_8)
+        }.getOrDefault("")
+    }
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -352,8 +410,20 @@ class MainActivity : ComponentActivity() {
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val prefs = application.getSharedPreferences("nexterp_session", 0)
 
-    private var accessToken: String = prefs.getString("access_token", "").orEmpty()
-    private var refreshToken: String = prefs.getString("refresh_token", "").orEmpty()
+    private var accessToken: String = SecureTokenStore.decrypt(prefs.getString("access_token", ""))
+    private var refreshToken: String = SecureTokenStore.decrypt(prefs.getString("refresh_token", ""))
+
+    init {
+        // Migrate legacy plaintext tokens from older NextERP Mobile versions in-place.
+        val storedAccess = prefs.getString("access_token", "").orEmpty()
+        val storedRefresh = prefs.getString("refresh_token", "").orEmpty()
+        if (storedAccess.isNotBlank() && !storedAccess.startsWith("enc:v1:")) {
+            prefs.edit().putString("access_token", SecureTokenStore.encrypt(accessToken)).apply()
+        }
+        if (storedRefresh.isNotBlank() && !storedRefresh.startsWith("enc:v1:")) {
+            prefs.edit().putString("refresh_token", SecureTokenStore.encrypt(refreshToken)).apply()
+        }
+    }
 
     var loginState by mutableStateOf(
         LoginState(
@@ -1247,8 +1317,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             .putString("username", session.username)
             .putString("display_name", session.displayName)
             .putString("role", session.role)
-            .putString("access_token", accessToken)
-            .putString("refresh_token", refreshToken)
+            .putString("access_token", SecureTokenStore.encrypt(accessToken))
+            .putString("refresh_token", SecureTokenStore.encrypt(refreshToken))
             .apply()
 
         loginState = loginState.copy(
@@ -1354,8 +1424,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 accessToken = session.accessToken
                 refreshToken = session.refreshToken
                 prefs.edit()
-                    .putString("access_token", accessToken)
-                    .putString("refresh_token", refreshToken)
+                    .putString("access_token", SecureTokenStore.encrypt(accessToken))
+                    .putString("refresh_token", SecureTokenStore.encrypt(refreshToken))
                     .putString("display_name", session.displayName)
                     .putString("role", session.role)
                     .apply()
@@ -5318,7 +5388,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
                 Spacer(Modifier.height(16.dp))
                 AssistChip(
                     onClick = {},
-                    label = { Text("Version 2.6.2 · API v1") },
+                    label = { Text("Version 2.7.0 · API v1") },
                     colors = AssistChipDefaults.assistChipColors(
                         containerColor = Color.White.copy(alpha = 0.12f),
                         labelColor = Color.White
