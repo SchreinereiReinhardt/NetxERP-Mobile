@@ -184,6 +184,14 @@ data class DownloadedDocument(
     val mimeType: String
 )
 
+data class ProjectNoteDraftState(
+    val projectId: Int? = null,
+    val open: Boolean = false,
+    val type: String = "Notiz",
+    val title: String = "",
+    val content: String = ""
+)
+
 data class TimeMaterialPosition(
     val materialId: Int? = null,
     val articleNo: String = "",
@@ -452,6 +460,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     var dataState by mutableStateOf(DataState())
         private set
 
+    var projectNoteDraft by mutableStateOf(ProjectNoteDraftState())
+        private set
+
     var screen by mutableStateOf(Screen.TODAY)
         private set
 
@@ -609,6 +620,32 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun consumeOpenNoteEditorRequest() {
         dataState = dataState.copy(openNoteEditorRequested = false)
+    }
+
+    fun beginProjectNoteDraft(projectId: Int) {
+        if (projectNoteDraft.open && projectNoteDraft.projectId == projectId) return
+        projectNoteDraft = ProjectNoteDraftState(projectId = projectId, open = true)
+        clearDocumentUploadMessage()
+    }
+
+    fun updateProjectNoteType(value: String) {
+        projectNoteDraft = projectNoteDraft.copy(type = value)
+        clearDocumentUploadMessage()
+    }
+
+    fun updateProjectNoteTitle(value: String) {
+        projectNoteDraft = projectNoteDraft.copy(title = value)
+        clearDocumentUploadMessage()
+    }
+
+    fun updateProjectNoteContent(value: String) {
+        projectNoteDraft = projectNoteDraft.copy(content = value)
+        clearDocumentUploadMessage()
+    }
+
+    fun closeProjectNoteDraft() {
+        projectNoteDraft = ProjectNoteDraftState()
+        clearDocumentUploadMessage()
     }
 
     fun openProjectDocument(document: DocumentDto) {
@@ -2410,6 +2447,12 @@ private fun AppShell(vm: AppViewModel) {
                     createNote = vm::createProjectNote,
                     clearUploadMessage = vm::clearDocumentUploadMessage,
                     consumeOpenNoteRequest = vm::consumeOpenNoteEditorRequest,
+                    noteDraft = vm.projectNoteDraft,
+                    beginNoteDraft = vm::beginProjectNoteDraft,
+                    updateNoteType = vm::updateProjectNoteType,
+                    updateNoteTitle = vm::updateProjectNoteTitle,
+                    updateNoteContent = vm::updateProjectNoteContent,
+                    closeNoteDraft = vm::closeProjectNoteDraft,
                     openDocument = vm::openProjectDocument,
                     consumeOpenedDocument = vm::consumeOpenedDocument,
                     clearDocumentOpenError = vm::clearDocumentOpenError,
@@ -4527,6 +4570,12 @@ private fun DocumentsScreen(
     createNote: (Int, String, String, String) -> Unit,
     clearUploadMessage: () -> Unit,
     consumeOpenNoteRequest: () -> Unit,
+    noteDraft: ProjectNoteDraftState,
+    beginNoteDraft: (Int) -> Unit,
+    updateNoteType: (String) -> Unit,
+    updateNoteTitle: (String) -> Unit,
+    updateNoteContent: (String) -> Unit,
+    closeNoteDraft: () -> Unit,
     openDocument: (DocumentDto) -> Unit,
     consumeOpenedDocument: () -> Unit,
     clearDocumentOpenError: () -> Unit,
@@ -4536,11 +4585,6 @@ private fun DocumentsScreen(
     val project = state.selectedProject
     var search by remember(project?.id) { mutableStateOf("") }
     var currentPath by remember(project?.id) { mutableStateOf<List<String>>(emptyList()) }
-    var showNewNoteEditor by rememberSaveable(project?.id) { mutableStateOf(false) }
-    var noteType by rememberSaveable(project?.id) { mutableStateOf("Notiz") }
-    var noteTitle by rememberSaveable(project?.id) { mutableStateOf("") }
-    var noteContent by rememberSaveable(project?.id) { mutableStateOf("") }
-
     LaunchedEffect(project?.id) {
         currentPath = emptyList()
         search = ""
@@ -4550,11 +4594,7 @@ private fun DocumentsScreen(
 
     LaunchedEffect(state.openNoteEditorRequested, project?.id) {
         if (state.openNoteEditorRequested && project != null) {
-            noteType = "Notiz"
-            noteTitle = ""
-            noteContent = ""
-            clearUploadMessage()
-            showNewNoteEditor = true
+            beginNoteDraft(project.id)
             consumeOpenNoteRequest()
         }
     }
@@ -4572,50 +4612,36 @@ private fun DocumentsScreen(
         }
     }
 
-    BackHandler(enabled = showNewNoteEditor) {
+    BackHandler(enabled = noteDraft.open) {
         if (!state.documentUploadLoading) {
-            showNewNoteEditor = false
-            clearUploadMessage()
+            closeNoteDraft()
         }
     }
 
     LaunchedEffect(state.documentUploadSuccess) {
-        if (state.documentUploadSuccess != null && showNewNoteEditor) {
-            showNewNoteEditor = false
-            noteTitle = ""
-            noteContent = ""
-            noteType = "Notiz"
+        if (state.documentUploadSuccess != null && noteDraft.open) {
+            closeNoteDraft()
         }
     }
 
-    if (showNewNoteEditor && project != null) {
+    if (noteDraft.open && noteDraft.projectId == project?.id && project != null) {
         ProjectNoteEditor(
             project = project,
-            noteType = noteType,
-            noteTitle = noteTitle,
-            noteContent = noteContent,
+            noteType = noteDraft.type,
+            noteTitle = noteDraft.title,
+            noteContent = noteDraft.content,
             saving = state.documentUploadLoading,
             error = state.documentUploadError,
-            onTypeChange = {
-                noteType = it
-                clearUploadMessage()
-            },
-            onTitleChange = {
-                noteTitle = it
-                clearUploadMessage()
-            },
-            onContentChange = {
-                noteContent = it
-                clearUploadMessage()
-            },
+            onTypeChange = updateNoteType,
+            onTitleChange = updateNoteTitle,
+            onContentChange = updateNoteContent,
             onCancel = {
                 if (!state.documentUploadLoading) {
-                    showNewNoteEditor = false
-                    clearUploadMessage()
+                    closeNoteDraft()
                 }
             },
             onSave = {
-                createNote(project.id, noteType, noteTitle, noteContent)
+                createNote(project.id, noteDraft.type, noteDraft.title, noteDraft.content)
             }
         )
         return
@@ -4716,7 +4742,7 @@ private fun DocumentsScreen(
                 noteType = "Notiz"
                 noteTitle = ""
                 noteContent = ""
-                showNewNoteEditor = true
+                beginNoteDraft(project.id)
             },
             modifier = Modifier.fillMaxWidth().height(54.dp),
             shape = RoundedCornerShape(16.dp)
