@@ -4739,9 +4739,6 @@ private fun DocumentsScreen(
         Button(
             onClick = {
                 clearUploadMessage()
-                noteType = "Notiz"
-                noteTitle = ""
-                noteContent = ""
                 beginNoteDraft(project.id)
             },
             modifier = Modifier.fillMaxWidth().height(54.dp),
