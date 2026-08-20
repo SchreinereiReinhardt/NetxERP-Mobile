@@ -36,6 +36,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -177,6 +178,12 @@ data class DocumentDto(
     val createdAt: String
 )
 
+data class DownloadedDocument(
+    val bytes: ByteArray,
+    val fileName: String,
+    val mimeType: String
+)
+
 data class TimeMaterialPosition(
     val materialId: Int? = null,
     val articleNo: String = "",
@@ -316,6 +323,10 @@ data class DataState(
     val documentUploadError: String? = null,
     val documentUploadSuccess: String? = null,
     val openNoteEditorRequested: Boolean = false,
+    val documentOpenLoading: Boolean = false,
+    val documentOpenUri: String? = null,
+    val documentOpenMime: String = "",
+    val documentOpenError: String? = null,
     val photos: List<DocumentDto> = emptyList(),
     val photosLoading: Boolean = false,
     val photosProjectId: Int? = null,
@@ -598,6 +609,69 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun consumeOpenNoteEditorRequest() {
         dataState = dataState.copy(openNoteEditorRequested = false)
+    }
+
+    fun openProjectDocument(document: DocumentDto) {
+        val project = dataState.selectedProject ?: return
+        viewModelScope.launch {
+            dataState = dataState.copy(
+                documentOpenLoading = true,
+                documentOpenError = null,
+                documentOpenUri = null
+            )
+            val result = authorizedRequest { token ->
+                NextErpApi.projectDocumentContent(
+                    loginState.server,
+                    token,
+                    project.id,
+                    document.filePath,
+                    document.fileName,
+                    document.mimeType
+                )
+            }
+            if (result.isFailure) {
+                dataState = dataState.copy(
+                    documentOpenLoading = false,
+                    documentOpenError = result.exceptionOrNull()?.message
+                        ?: "Dokument konnte nicht geöffnet werden."
+                )
+                return@launch
+            }
+
+            val downloaded = result.getOrThrow()
+            try {
+                val folder = File(getApplication<Application>().cacheDir, "documents").apply { mkdirs() }
+                val safeName = downloaded.fileName
+                    .replace(Regex("[^A-Za-z0-9._ -]"), "_")
+                    .ifBlank { "Dokument" }
+                val file = File(folder, safeName)
+                file.writeBytes(downloaded.bytes)
+                val uri = FileProvider.getUriForFile(
+                    getApplication(),
+                    getApplication<Application>().packageName + ".fileprovider",
+                    file
+                )
+                dataState = dataState.copy(
+                    documentOpenLoading = false,
+                    documentOpenUri = uri.toString(),
+                    documentOpenMime = downloaded.mimeType.ifBlank { "application/octet-stream" },
+                    documentOpenError = null
+                )
+            } catch (error: Exception) {
+                dataState = dataState.copy(
+                    documentOpenLoading = false,
+                    documentOpenError = error.message ?: "Dokument konnte nicht vorbereitet werden."
+                )
+            }
+        }
+    }
+
+    fun consumeOpenedDocument() {
+        dataState = dataState.copy(documentOpenUri = null)
+    }
+
+    fun clearDocumentOpenError() {
+        dataState = dataState.copy(documentOpenError = null)
     }
 
     fun openProjectDocuments(project: ProjectDto) {
@@ -1301,7 +1375,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             loginState.server,
             loginState.username.trim(),
             loginState.password,
-            "NextERP Android"
+            "Betrio Android"
         )
         if (result.isFailure) {
             loginState = loginState.copy(
@@ -1481,7 +1555,7 @@ object NextErpApi {
             val json = if (text.isBlank()) JSONObject() else JSONObject(text)
             if (code == 401) throw ApiUnauthorizedException(apiMessage(json, "Anmeldung abgelaufen."))
             if (code !in 200..299) error(apiMessage(json, "Serverfehler HTTP $code."))
-            if (!json.optBoolean("success", false)) error(apiMessage(json, "NextERP meldet einen Fehler."))
+            if (!json.optBoolean("success", false)) error(apiMessage(json, "Betrio meldet einen Fehler."))
             json.opt("data") ?: JSONObject.NULL
         } finally {
             connection.disconnect()
@@ -1839,6 +1913,52 @@ object NextErpApi {
         }
     }
 
+    suspend fun projectDocumentContent(
+        server: String,
+        token: String,
+        projectId: Int,
+        filePath: String,
+        fileName: String,
+        mimeType: String
+    ): Result<DownloadedDocument> = runCatching {
+        withContext(Dispatchers.IO) {
+            val encodedPath = Uri.encode(filePath)
+            val connection = (URL(apiBase(server) + "/project/$projectId/documents/content?path=$encodedPath")
+                .openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 15_000
+                readTimeout = 30_000
+                setRequestProperty("Accept", "*/*")
+                setRequestProperty("Authorization", "Bearer $token")
+            }
+            try {
+                val code = connection.responseCode
+                if (code == 401) throw ApiUnauthorizedException("Anmeldung abgelaufen.")
+                if (code !in 200..299) {
+                    val message = connection.errorStream?.bufferedReader()?.use { it.readText() }
+                        .orEmpty()
+                    error(
+                        runCatching { JSONObject(message).optString("message") }.getOrNull()
+                            ?.takeIf { it.isNotBlank() }
+                            ?: "Dokument konnte nicht geladen werden (HTTP $code)."
+                    )
+                }
+                val resolvedMime = connection.contentType
+                    ?.substringBefore(';')
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                    ?: mimeType.ifBlank { "application/octet-stream" }
+                DownloadedDocument(
+                    bytes = connection.inputStream.use { it.readBytes() },
+                    fileName = fileName.ifBlank { "Dokument" },
+                    mimeType = resolvedMime
+                )
+            } finally {
+                connection.disconnect()
+            }
+        }
+    }
+
     suspend fun projectPhotos(server: String, token: String, projectId: Int): Result<List<DocumentDto>> = runCatching {
         when (val data = request(server, "/project/$projectId/photos", token = token)) {
             is org.json.JSONArray -> data.toDocuments()
@@ -2043,7 +2163,7 @@ fun NextERPApp(vm: AppViewModel = viewModel()) {
 private fun SplashScreen() {
     Surface(
         modifier = Modifier.fillMaxSize(),
-        color = Color(0xFF063B70)
+        color = Color(0xFF001A4D)
     ) {
         Column(
             modifier = Modifier
@@ -2054,12 +2174,12 @@ private fun SplashScreen() {
         ) {
             Image(
                 painter = painterResource(id = R.drawable.nexterp_logo),
-                contentDescription = "NextERP",
+                contentDescription = "Betrio",
                 modifier = Modifier.size(132.dp)
             )
             Spacer(Modifier.height(22.dp))
             Text(
-                "NextERP",
+                "Betrio",
                 style = MaterialTheme.typography.headlineLarge,
                 fontWeight = FontWeight.ExtraBold,
                 color = Color.White
@@ -2073,12 +2193,12 @@ private fun SplashScreen() {
             Text(
                 "Handwerk. Einfach. Digital.",
                 style = MaterialTheme.typography.bodyLarge,
-                color = Color(0xFFA7CD58),
+                color = Color(0xFF0A59C6),
                 fontWeight = FontWeight.SemiBold
             )
             Spacer(Modifier.height(30.dp))
             CircularProgressIndicator(
-                color = Color(0xFFA7CD58),
+                color = Color(0xFF0A59C6),
                 trackColor = Color.White.copy(alpha = 0.18f)
             )
             Spacer(Modifier.height(42.dp))
@@ -2090,7 +2210,7 @@ private fun SplashScreen() {
             Text(
                 "André Reinhardt",
                 style = MaterialTheme.typography.titleMedium,
-                color = Color(0xFFA7CD58),
+                color = Color(0xFF0A59C6),
                 fontWeight = FontWeight.Bold
             )
             Text(
@@ -2117,13 +2237,13 @@ private fun LoginScreen(state: LoginState, vm: AppViewModel) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Image(
                     painter = painterResource(id = R.drawable.nexterp_logo),
-                    contentDescription = "NextERP",
+                    contentDescription = "Betrio",
                     modifier = Modifier.size(82.dp)
                 )
                 Spacer(Modifier.width(16.dp))
                 Column {
                     Text(
-                        "NextERP",
+                        "Betrio",
                         style = MaterialTheme.typography.headlineLarge,
                         fontWeight = FontWeight.ExtraBold
                     )
@@ -2187,7 +2307,7 @@ private fun LoginScreen(state: LoginState, vm: AppViewModel) {
                 )
                 Spacer(Modifier.width(6.dp))
                 Text(
-                    "Direkte, verschlüsselte Verbindung zu NextERP",
+                    "Direkte, verschlüsselte Verbindung zu Betrio",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -2290,6 +2410,9 @@ private fun AppShell(vm: AppViewModel) {
                     createNote = vm::createProjectNote,
                     clearUploadMessage = vm::clearDocumentUploadMessage,
                     consumeOpenNoteRequest = vm::consumeOpenNoteEditorRequest,
+                    openDocument = vm::openProjectDocument,
+                    consumeOpenedDocument = vm::consumeOpenedDocument,
+                    clearDocumentOpenError = vm::clearDocumentOpenError,
                     refresh = {
                         vm.dataState.selectedProject?.let { vm.loadProjectDocuments(it.id) }
                     }
@@ -2489,7 +2612,7 @@ private fun TodayScreen(state: DataState, openProject: (ProjectDto) -> Unit, ref
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text(
-                                if (state.connectionOk) "NextERP ist online" else "Verbindung unterbrochen",
+                                if (state.connectionOk) "Betrio ist online" else "Verbindung unterbrochen",
                                 fontWeight = FontWeight.Bold,
                                 color = if (state.connectionOk) {
                                     MaterialTheme.colorScheme.onPrimaryContainer
@@ -2622,7 +2745,7 @@ private fun ProjectsScreen(
         when {
             state.loading -> LoadingState()
             state.error != null -> ErrorState(state.error, refresh)
-            state.projects.isEmpty() -> EmptyState("Keine aktiven Projekte im NextERP gefunden.")
+            state.projects.isEmpty() -> EmptyState("Keine aktiven Projekte in Betrio gefunden.")
             else -> state.projects.forEach { project -> ProjectCard(project) { openProject(project) } }
         }
     }
@@ -4404,24 +4527,25 @@ private fun DocumentsScreen(
     createNote: (Int, String, String, String) -> Unit,
     clearUploadMessage: () -> Unit,
     consumeOpenNoteRequest: () -> Unit,
+    openDocument: (DocumentDto) -> Unit,
+    consumeOpenedDocument: () -> Unit,
+    clearDocumentOpenError: () -> Unit,
     refresh: () -> Unit
 ) {
     val context = LocalContext.current
-    var search by remember { mutableStateOf("") }
-    var currentPath by remember { mutableStateOf<List<String>>(emptyList()) }
-    var showNewNoteEditor by remember { mutableStateOf(false) }
-    var noteType by remember { mutableStateOf("Notiz") }
-    var noteTitle by remember { mutableStateOf("") }
-    var noteContent by remember { mutableStateOf("") }
     val project = state.selectedProject
+    var search by remember(project?.id) { mutableStateOf("") }
+    var currentPath by remember(project?.id) { mutableStateOf<List<String>>(emptyList()) }
+    var showNewNoteEditor by rememberSaveable(project?.id) { mutableStateOf(false) }
+    var noteType by rememberSaveable(project?.id) { mutableStateOf("Notiz") }
+    var noteTitle by rememberSaveable(project?.id) { mutableStateOf("") }
+    var noteContent by rememberSaveable(project?.id) { mutableStateOf("") }
 
     LaunchedEffect(project?.id) {
         currentPath = emptyList()
         search = ""
-        noteTitle = ""
-        noteContent = ""
-        noteType = "Notiz"
         clearUploadMessage()
+        clearDocumentOpenError()
     }
 
     LaunchedEffect(state.openNoteEditorRequested, project?.id) {
@@ -4432,6 +4556,19 @@ private fun DocumentsScreen(
             clearUploadMessage()
             showNewNoteEditor = true
             consumeOpenNoteRequest()
+        }
+    }
+
+    LaunchedEffect(state.documentOpenUri) {
+        val uriText = state.documentOpenUri ?: return@LaunchedEffect
+        try {
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(Uri.parse(uriText), state.documentOpenMime.ifBlank { "application/octet-stream" })
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            context.startActivity(Intent.createChooser(intent, "Dokument öffnen"))
+        } finally {
+            consumeOpenedDocument()
         }
     }
 
@@ -4619,6 +4756,38 @@ private fun DocumentsScreen(
             }
         }
 
+        if (state.documentOpenLoading) {
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            Text(
+                "Dokument wird geladen …",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        state.documentOpenError?.let { message ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer
+                )
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        message,
+                        modifier = Modifier.weight(1f),
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                    IconButton(onClick = clearDocumentOpenError) {
+                        Icon(Icons.Default.Close, "Meldung schließen")
+                    }
+                }
+            }
+        }
+
         OutlinedTextField(
             value = search,
             onValueChange = { search = it },
@@ -4674,11 +4843,7 @@ private fun DocumentsScreen(
                                         .joinToString(" / ")
                                         .ifBlank { "Projektordner" },
                                     onOpen = {
-                                        openDocumentInNextcloud(
-                                            context,
-                                            server,
-                                            item.document
-                                        )
+                                        openDocument(item.document)
                                     }
                                 )
                             }
@@ -4748,11 +4913,7 @@ private fun DocumentsScreen(
                                 document = item.document,
                                 folderLabel = null,
                                 onOpen = {
-                                    openDocumentInNextcloud(
-                                        context,
-                                        server,
-                                        item.document
-                                    )
+                                    openDocument(item.document)
                                 }
                             )
                         }
@@ -5357,7 +5518,7 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(26.dp),
             colors = CardDefaults.cardColors(
-                containerColor = Color(0xFF063B70)
+                containerColor = Color(0xFF001A4D)
             )
         ) {
             Column(
@@ -5366,12 +5527,12 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
             ) {
                 Image(
                     painter = painterResource(id = R.drawable.nexterp_logo),
-                    contentDescription = "NextERP",
+                    contentDescription = "Betrio",
                     modifier = Modifier.size(104.dp)
                 )
                 Spacer(Modifier.height(14.dp))
                 Text(
-                    "NextERP",
+                    "Betrio",
                     style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.ExtraBold,
                     color = Color.White
@@ -5385,13 +5546,13 @@ private fun MoreScreen(login: LoginState, logout: () -> Unit) {
                 Text(
                     "Handwerk. Einfach. Digital.",
                     style = MaterialTheme.typography.bodyLarge,
-                    color = Color(0xFFA7CD58),
+                    color = Color(0xFF0A59C6),
                     fontWeight = FontWeight.SemiBold
                 )
                 Spacer(Modifier.height(16.dp))
                 AssistChip(
                     onClick = {},
-label = { Text("Version 2.8.1 · API v1") },
+label = { Text("Version 2.9.0 · API v1") },
                     colors = AssistChipDefaults.assistChipColors(
                         containerColor = Color.White.copy(alpha = 0.12f),
                         labelColor = Color.White
